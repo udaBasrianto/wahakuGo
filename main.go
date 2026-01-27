@@ -14,6 +14,8 @@ import (
 	"sync"
 	"time"
 
+	"math/rand"
+
 	"github.com/PuerkitoBio/goquery"
 	"database/sql"
 	_ "github.com/go-sql-driver/mysql"
@@ -27,6 +29,7 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	_ "modernc.org/sqlite"
+	"google.golang.org/protobuf/proto"
 
 	"google.golang.org/api/option"
 	"google.golang.org/api/sheets/v4"
@@ -193,15 +196,92 @@ func main() {
 				return c.Status(500).JSON(fiber.Map{"success": false, "message": "Session Error"})
 			}
 
+			// Check if WhatsApp is connected
+			if client != nil && client.IsConnected() && client.Store.ID != nil {
+				// Generate OTP
+				rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+				otp := fmt.Sprintf("%06d", rng.Intn(1000000))
+				
+				// Save OTP to session
+				sess.Set("otp", otp)
+				sess.Set("otp_expiry", time.Now().Add(5*time.Minute).Unix())
+				sess.Set("temp_auth", true) // Temporary flag
+				if err := sess.Save(); err != nil {
+					return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to save session"})
+				}
+
+				// Send OTP via WhatsApp (Self Message)
+				targetJID := *client.Store.ID
+				msg := &waE2E.Message{
+					Conversation: proto.String("🔐 Kode Login Wahaku Dashboard: *" + otp + "*\n\nJangan berikan kode ini kepada siapapun."),
+				}
+				
+				resp, err := client.SendMessage(context.Background(), targetJID, msg)
+				if err != nil {
+					log.Println("Failed to send OTP:", err)
+					// Fallback to normal login if failed to send
+					sess.Set("authenticated", true)
+					sess.Save()
+					return c.JSON(fiber.Map{"success": true, "require_otp": false, "message": "Gagal kirim OTP, login langsung."})
+				}
+				
+				log.Printf("OTP Sent to %s: %s (ID: %s)", targetJID.User, otp, resp.ID)
+				return c.JSON(fiber.Map{"success": true, "require_otp": true, "message": "OTP dikirim ke WhatsApp"})
+			}
+
+			// If WA not connected, normal login
 			sess.Set("authenticated", true)
 			if err := sess.Save(); err != nil {
 				return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to save session"})
 			}
 
-			return c.JSON(fiber.Map{"success": true})
+			return c.JSON(fiber.Map{"success": true, "require_otp": false})
 		}
 
 		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Username atau Password salah"})
+	})
+
+	auth.Post("/verify", func(c *fiber.Ctx) error {
+		var req struct {
+			OTP string `json:"otp"`
+		}
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid Request"})
+		}
+
+		sess, err := store.Get(c)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Session Error"})
+		}
+
+		// Check if temp_auth is set
+		if sess.Get("temp_auth") != true {
+			return c.Status(401).JSON(fiber.Map{"success": false, "message": "Sesi tidak valid, silakan login ulang"})
+		}
+
+		storedOTP := sess.Get("otp")
+		expiryVal := sess.Get("otp_expiry")
+		
+		if storedOTP == nil || expiryVal == nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "OTP kadaluarsa atau tidak ditemukan"})
+		}
+
+		expiry := expiryVal.(int64)
+		if time.Now().Unix() > expiry {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "OTP sudah kadaluarsa"})
+		}
+
+		if req.OTP == storedOTP.(string) {
+			// Success
+			sess.Set("authenticated", true)
+			sess.Delete("otp")
+			sess.Delete("otp_expiry")
+			sess.Delete("temp_auth")
+			sess.Save()
+			return c.JSON(fiber.Map{"success": true})
+		}
+
+		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Kode OTP salah"})
 	})
 
 	auth.Post("/logout", func(c *fiber.Ctx) error {
