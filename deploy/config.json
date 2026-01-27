@@ -1,0 +1,54 @@
+{
+  "active_provider": "byteplus",
+  "app_port": "3000",
+  "system_prompt": "kamu adalah admin dari Akhimedia, yg bergerka dibidang jasa pembuatan website, appliakasi, websystem dan semisal itu. \nWebsite kita akhimedia.id, kamu bisa merujuk informasi / profile perusahan kita di web akhimedia.id ( website kita hanya ini)",
+  "saved_prompts": {
+    "akhimedia": "kamu adalah admin dari Akhimedia, yg bergerka dibidang jasa pembuatan website, appliakasi, websystem dan semisal itu. \nWebsite kita akhimedia.id, kamu bisa merujuk informasi / profile perusahan kita di web akhimedia.id ( website kita hanya ini)"
+  },
+  "knowledge_urls": [
+    "https://akhimedia.id/"
+  ],
+  "knowledge_files": [
+    "struktur_poltekkes_gabungan_final.pdf",
+    "Tiga Pondasi.pdf",
+    "poltkes.pdf"
+  ],
+  "providers": {
+    "byteplus": {
+      "api_key": "b2e8c7be-d03c-40d2-8ae8-1370362aa63f",
+      "model": "deepseek-v3-2-251201",
+      "base_url": "https://ark.ap-southeast.bytepluses.com/api/v3"
+    },
+    "gemini": {
+      "api_key": "AIzaSyBztnv4JDcHW4Riy9G7Uq1smUsudIM7m08",
+      "model": "",
+      "base_url": "https://generativelanguage.googleapis.com/v1beta"
+    },
+    "groq": {
+      "api_key": "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",
+      "model": "gemma-7b-it",
+      "base_url": "https://api.groq.com/openai/v1"
+    },
+    "openai": {
+      "api_key": "",
+      "model": "gpt-3.5-turbo",
+      "base_url": "https://api.openai.com/v1"
+    },
+    "qwen": {
+      "api_key": "",
+      "model": "qwen-turbo",
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    }
+  },
+  "database": {
+    "host": "",
+    "port": "",
+    "user": "",
+    "password": "",
+    "name": ""
+  },
+  "sheet": {
+    "spreadsheet_id": "1h38_D0rkkWDHD46yfeTAUtJS8YiLwFTIo4asRXM0GQU",
+    "credentials_json": "{\n  \"type\": \"service_account\",\n  \"project_id\": \"gen-lang-client-0326462549\",\n  \"private_key_id\": \"e785319de7267d085eff9af6f0b73a46484ff843\",\n  \"private_key\": \"-----BEGIN PRIVATE KEY-----\\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCii1IrY2sGSzvb\\n/NCk78EaRANMD+q152LVbNj4rc9Qu2oBnSnRxrNI6YThb5KZtaE020BJg06Qcfbq\\nNygTusgwUmwuLTwSs8Au97DeXsWtXu1FgTUAWK/2Fccnc93eDRtVgr7OEBERigxu\\nrm3XMgX6T1h/O36birISXXJ9jiHYjc1XV5TWo1SL1ikBkcaJeyolUqr1cz2tmLHP\\n1Z5x8JuzXnT5Jy0iKkl7qwHvUnYnmXk96ku2FLHfYpSvy/NGHO8gCUqvwyU8+BvC\\npoEoK1d7hag4D1qqTpSzuavLfMWBpXF5CbQGeYYFeMI7vE48+Hhm1evvbu536jf2\\nVFwTd9b3AgMBAAECggEASRXCyw6HM0vFrPsGZ3sEBQbawqsPel4BYvxvrJUeN+sk\\n1Xfws0mYGGsjW+f6b1GrG+SPid5YB3uurY5CX2inFY8h5DtjnPckrRmi9cGAOZ2K\\nqytXBQJbkBcntnYTJwIWrcK9f1LbEdtUDrowWke8R1nA7Wh3W4Gn4rkQvyKW1lLo\\ntX9Me/fDOrsz3RNrecYTVL4zQMOiPPBnJ+/2i/5MMZ0qqqjN4m4JSfzUKrPT5uQ6\\npr9LQ6fDj4hO84Y54rM13Ok8cWudc1wqkgISiPST0X2rmw4Z6rbUYQkUkh8lc+NJ\\nJRK+yXpAgWLK/CKEEBPj4QzYfMLUHYLU8AhIv3jEhQKBgQDMlZFJbDEtQZE0+OyY\\nq8M1Oe+MKj4BqY6yWhU1NpkWN7r4usF+Wua4gnj1vYxg5cs3RTShB1lT08IEPE72\\nitGtOOSHLRbqtWCz0pyI+Bo02pyApR48ppTLboUD60cB0HSNNVNzgjEW9SRAJVP5\\ns9u+BoAhUJTJ51Ha6mfUGrGmXQKBgQDLZQExIRy9gITuinOy58UFmMbxyLGitwFk\\nXfok7A1VIzjwXgHOWwSVh6KlPPe7PT5cfqnKb5lteM8YSD+yi4dwlrNT1K6/x4Ev\\nE4JIZkjtuIp8U+CSc2xwtNdEpjx3WaGugdrWIa3W2kPVY3u9pTHxgOuNH/arYATu\\nm4Fa2ux1YwKBgBbo7OMm/X7O597hvUT/fxW3zi6JEHaJMVShp9xUp+IIDaUK7N4k\\nec/RtI/4UP8M3Kvs0Q7zTrqHbSOiSUlslDxssZK9puJTu2eHv0XLWsvuazYwx2kN\\nUn5Rew3MTCBU4qhpf1XhD3Q9sXiJdZTx4jquaazRZEgT4mO8ejITZy91AoGBAK0a\\ntK38kXpTBFAEs72i9hLyWPd0qIJkoKGsPfXolNxN0ur4By96VWdx/aIGRo0r7YRJ\\nJPaujnUWKaNv8g5iJA5VpCAH1gZQpIjNYMd/jjgMJIj11h6ub69oqgG6PaISPcHI\\nsNgn580BDFRzi9/21Y/F+jOs7YIjgW8WGDycMD0jAoGAX71ZAXE0qyEMn8ni+yP2\\njD2Dr9tpOrjTsSi9te72IaRJWDQnGQS3rYs4EnaLzIbsW98Ti5Ad5v/bevci19zv\\nhNxD2B0XaaY99DDedVSqEFM5k3q2qKE/Rr5deb2Nsa8QppeziZHUWpKp5FnoMRq2\\nS7oxyx+HHlT6vHlHuoMUoYs=\\n-----END PRIVATE KEY-----\\n\",\n  \"client_email\": \"googlesheet-bot@gen-lang-client-0326462549.iam.gserviceaccount.com\",\n  \"client_id\": \"115947330350969276448\",\n  \"auth_uri\": \"https://accounts.google.com/o/oauth2/auth\",\n  \"token_uri\": \"https://oauth2.googleapis.com/token\",\n  \"auth_provider_x509_cert_url\": \"https://www.googleapis.com/oauth2/v1/certs\",\n  \"client_x509_cert_url\": \"https://www.googleapis.com/robot/v1/metadata/x509/googlesheet-bot%40gen-lang-client-0326462549.iam.gserviceaccount.com\",\n  \"universe_domain\": \"googleapis.com\"\n}\n"
+  }
+}

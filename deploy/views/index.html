@@ -1,0 +1,918 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wahaku Bot Dashboard (GoFiber)</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🤖</text></svg>">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+</head>
+<body class="bg-gray-100 min-h-screen font-sans">
+
+<div class="container mx-auto px-4 py-8 max-w-5xl">
+    
+    <!-- Header -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+        <div class="bg-white rounded-xl shadow-lg p-6 flex flex-col justify-center gap-2">
+            <div class="flex items-center gap-3">
+                <div class="bg-blue-600 text-white p-3 rounded-full">
+                    <i class="fas fa-robot text-2xl"></i>
+                </div>
+                <div>
+                    <h1 class="text-xl font-bold text-gray-800">Wahaku Go</h1>
+                    <p class="text-gray-500 text-xs">High Performance WhatsApp Bot</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Controls -->
+        <div class="bg-white rounded-xl shadow-lg p-6 flex flex-col items-center justify-center text-center">
+            <h3 class="text-gray-500 font-bold text-sm mb-3">SERVER CONTROL</h3>
+            <div class="flex gap-2 w-full justify-center">
+                <button onclick="controlServer('restart')" class="flex-1 bg-yellow-500 hover:bg-yellow-600 text-white py-2 px-3 rounded-lg text-sm font-bold transition shadow-sm">
+                    <i class="fas fa-sync-alt"></i> Restart
+                </button>
+                <button id="btnLogout" onclick="controlServer('logout')" class="hidden flex-1 bg-red-500 hover:bg-red-600 text-white py-2 px-3 rounded-lg text-sm font-bold transition shadow-sm">
+                    <i class="fas fa-sign-out-alt"></i> Logout
+                </button>
+            </div>
+        </div>
+
+        <!-- Status -->
+        <div class="bg-white rounded-xl shadow-lg p-6 flex flex-col items-center justify-center text-center relative overflow-hidden">
+            <div id="status-indicator" class="absolute top-0 left-0 w-full h-1 bg-gray-300"></div>
+            <h3 class="text-gray-500 font-bold text-sm mb-2">STATUS WHATSAPP</h3>
+            <div id="wa-status-text" class="text-xl font-bold text-gray-700 flex items-center gap-2">
+                <i class="fas fa-circle-notch fa-spin"></i> Memuat...
+            </div>
+            <div id="qrcode-container" class="hidden mt-4">
+                <div id="qrcode" class="p-2 bg-white border-2 border-gray-100 rounded-lg"></div>
+                <p class="text-xs text-gray-400 mt-2">Scan pakai HP Anda</p>
+            </div>
+        </div>
+    </div>
+
+    <form id="configForm" onsubmit="saveConfig(event)" class="space-y-6">
+        
+        <!-- Row 1: Konfigurasi AI (Split Kiri-Kanan) -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <!-- Left Column: Pilih Otak AI -->
+            <div class="md:col-span-1 space-y-6">
+                <div class="bg-white rounded-xl shadow-lg p-6">
+                    <h2 class="text-lg font-bold text-gray-800 mb-4 border-b pb-2">1. Pilih Otak AI</h2>
+                    <div class="space-y-3" id="providerList">
+                        <!-- JS will populate this -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Column: Konfigurasi Provider -->
+            <div class="md:col-span-2">
+                <div class="bg-white rounded-xl shadow-lg p-6">
+                    <h2 class="text-lg font-bold text-gray-800 mb-4 border-b pb-2">2. Konfigurasi <span id="providerTitle" class="text-blue-600">...</span></h2>
+                    <div id="settingsContainer">
+                        <!-- JS will populate settings -->
+                    </div>
+
+                    <div class="mt-8 pt-6 border-t flex justify-end">
+                        <button type="submit" class="bg-blue-600 text-white px-8 py-3 rounded-lg font-bold shadow-lg hover:bg-blue-700 hover:shadow-xl transition transform hover:-translate-y-1">
+                            <i class="fas fa-save mr-2"></i> SIMPAN PENGATURAN
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Row 2: Instruksi & Knowledge Base (Full Width) -->
+        <div class="bg-white rounded-xl shadow-lg p-6">
+            <div class="flex justify-between items-center mb-2">
+                <h2 class="text-lg font-bold text-gray-800">Instruksi (Prompt)</h2>
+                <button type="button" onclick="savePromptPreset()" class="text-xs bg-green-500 hover:bg-green-600 text-white px-2 py-1 rounded">
+                    <i class="fas fa-plus"></i> Simpan Template
+                </button>
+            </div>
+            
+            <!-- Presets Table -->
+            <div class="overflow-x-auto mb-4 border rounded-lg">
+                <table class="min-w-full text-sm text-left text-gray-500">
+                    <thead class="text-xs text-gray-700 uppercase bg-gray-50 border-b">
+                        <tr>
+                            <th scope="col" class="px-4 py-3">Nama Template</th>
+                            <th scope="col" class="px-4 py-3">Preview Instruksi</th>
+                            <th scope="col" class="px-4 py-3 text-right">Aksi</th>
+                        </tr>
+                    </thead>
+                    <tbody id="promptPresets">
+                        <!-- JS will populate -->
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Database Config -->
+            <div class="bg-white p-4 rounded-lg shadow-sm mb-4 border-l-4 border-yellow-500">
+                <h2 class="text-sm font-bold text-gray-800 mb-3 flex items-center gap-2">
+                    <i class="fas fa-database text-yellow-500"></i> Koneksi Database (MySQL)
+                </h2>
+                <div class="grid grid-cols-2 gap-3 mb-2">
+                    <div>
+                        <label class="block text-xs font-bold text-gray-700 mb-1">Host</label>
+                        <input type="text" id="db_host" class="w-full p-2 text-sm border rounded focus:ring-1 focus:ring-yellow-500" placeholder="127.0.0.1">
+                    </div>
+                    <div>
+                        <label class="block text-xs font-bold text-gray-700 mb-1">Port</label>
+                        <input type="text" id="db_port" class="w-full p-2 text-sm border rounded focus:ring-1 focus:ring-yellow-500" placeholder="3306">
+                    </div>
+                </div>
+                <div class="grid grid-cols-2 gap-3 mb-2">
+                    <div>
+                        <label class="block text-xs font-bold text-gray-700 mb-1">Username</label>
+                        <input type="text" id="db_user" class="w-full p-2 text-sm border rounded focus:ring-1 focus:ring-yellow-500" placeholder="root">
+                    </div>
+                    <div>
+                        <label class="block text-xs font-bold text-gray-700 mb-1">Password</label>
+                        <input type="password" id="db_password" class="w-full p-2 text-sm border rounded focus:ring-1 focus:ring-yellow-500" placeholder="Kosongkan jika tidak ada">
+                    </div>
+                </div>
+                <div class="mb-3">
+                    <label class="block text-xs font-bold text-gray-700 mb-1">Database Name</label>
+                    <input type="text" id="db_name" class="w-full p-2 text-sm border rounded focus:ring-1 focus:ring-yellow-500" placeholder="nama_database">
+                </div>
+                <button type="button" id="btn-test-db" onclick="testDB()" class="text-xs bg-yellow-100 text-yellow-700 px-3 py-2 rounded hover:bg-yellow-200 w-full font-bold">
+                    <i class="fas fa-plug"></i> Simpan & Test Koneksi
+                </button>
+            </div>
+
+            <!-- Google Sheets Config -->
+            <div class="bg-white p-4 rounded-lg shadow-sm mb-4 border-l-4 border-green-500">
+                <h2 class="text-sm font-bold text-gray-800 mb-3 flex items-center gap-2">
+                    <i class="fas fa-file-excel text-green-500"></i> Koneksi Google Sheets
+                </h2>
+                <div class="mb-3">
+                    <label class="block text-xs font-bold text-gray-700 mb-1">Spreadsheet ID</label>
+                    <input type="text" id="sheet_id" class="w-full p-2 text-sm border rounded focus:ring-1 focus:ring-green-500" placeholder="ID Spreadsheet dari URL">
+                </div>
+                <div class="mb-3">
+                    <label class="block text-xs font-bold text-gray-700 mb-1">Credentials JSON</label>
+                    <textarea id="sheet_creds" class="w-full h-24 p-2 text-xs border rounded focus:ring-1 focus:ring-green-500 font-mono" placeholder='Paste isi file credentials.json di sini...'></textarea>
+                </div>
+                <button type="button" id="btn-test-sheet" onclick="testSheet()" class="text-xs bg-green-100 text-green-700 px-3 py-2 rounded hover:bg-green-200 w-full font-bold">
+                    <i class="fas fa-plug"></i> Simpan & Test Koneksi
+                </button>
+            </div>
+
+            <textarea id="system_prompt" class="w-full h-48 p-3 text-sm border rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none bg-gray-50" placeholder="Tulis instruksi untuk AI di sini..."></textarea>
+        
+            <div class="mt-4 border-t pt-4">
+                <h2 class="text-sm font-bold text-gray-800 mb-3 flex items-center gap-2">
+                    <i class="fas fa-book text-blue-500"></i> Sumber Pengetahuan (Knowledge Base)
+                </h2>
+                
+                <!-- Tabs -->
+                <div class="flex border-b mb-3">
+                    <button type="button" onclick="switchTab('url')" id="tab-url" class="px-4 py-2 text-sm font-medium text-blue-600 border-b-2 border-blue-600 focus:outline-none">Website (URL)</button>
+                    <button type="button" onclick="switchTab('file')" id="tab-file" class="px-4 py-2 text-sm font-medium text-gray-500 hover:text-gray-700 focus:outline-none">Dokumen (PDF/TXT)</button>
+                </div>
+
+                <!-- URL Tab Content -->
+                <div id="content-url">
+                    <div class="flex gap-2 mb-2">
+                        <input type="url" id="new_url" class="flex-1 p-2 text-sm border rounded focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="https://contoh.com">
+                        <button type="button" onclick="addURL()" class="bg-blue-500 text-white px-3 py-1 rounded hover:bg-blue-600 text-sm">
+                            <i class="fas fa-plus"></i> Tambah
+                        </button>
+                    </div>
+                    <ul id="url_list" class="space-y-1 text-sm text-gray-600 max-h-32 overflow-y-auto">
+                        <!-- URL List -->
+                    </ul>
+                </div>
+
+                <!-- File Tab Content -->
+                <div id="content-file" class="hidden">
+                    <div class="flex gap-2 mb-2 items-center">
+                        <input type="file" id="file_upload" accept=".pdf,.txt" class="flex-1 text-sm file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100">
+                        <button type="button" onclick="uploadFile()" class="bg-green-500 text-white px-3 py-1 rounded hover:bg-green-600 text-sm">
+                            <i class="fas fa-upload"></i> Upload
+                        </button>
+                    </div>
+                    <ul id="file_list" class="space-y-1 text-sm text-gray-600 max-h-32 overflow-y-auto">
+                        <!-- File List -->
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </form>
+</div>
+
+<script>
+let currentConfig = {};
+const providersInfo = {
+    'gemini': {icon: 'fa-google', name: 'Google Gemini', color: 'text-blue-500'},
+    'openai': {icon: 'fa-bolt', name: 'OpenAI (GPT)', color: 'text-green-500'},
+    'groq':   {icon: 'fa-microchip', name: 'Groq (Fast)', color: 'text-orange-500'},
+    'qwen':   {icon: 'fa-cloud', name: 'Qwen (Alibaba)', color: 'text-purple-500'},
+    'byteplus': {icon: 'fa-music', name: 'BytePlus (Doubao)', color: 'text-pink-500'}
+};
+
+async function loadData() {
+    try {
+        const res = await fetch('/api/config');
+        currentConfig = await res.json();
+        renderUI();
+    } catch(e) {
+        console.error("Failed to load config", e);
+    }
+}
+
+function renderUI() {
+    document.getElementById('system_prompt').value = currentConfig.system_prompt;
+    
+    // Render URL List
+    const urlList = document.getElementById('url_list');
+    urlList.innerHTML = '';
+    (currentConfig.knowledge_urls || []).forEach(url => {
+        const li = document.createElement('li');
+        li.className = 'flex justify-between items-center bg-gray-50 p-2 rounded';
+        li.innerHTML = `
+            <span class="truncate w-full mr-2" title="${url}">${url}</span>
+            <button onclick="removeURL('${url}')" class="text-red-500 hover:text-red-700">
+                <i class="fas fa-trash-alt"></i>
+            </button>
+        `;
+        urlList.appendChild(li);
+    });
+
+    // Render File List
+    const fileList = document.getElementById('file_list');
+    fileList.innerHTML = '';
+    (currentConfig.knowledge_files || []).forEach(file => {
+        const li = document.createElement('li');
+        li.className = 'flex justify-between items-center bg-gray-50 p-2 rounded';
+        
+        // Create elements safely to avoid quote escaping issues
+        const span = document.createElement('span');
+        span.className = 'truncate w-full mr-2';
+        span.title = file;
+        span.textContent = file;
+
+        const btn = document.createElement('button');
+        btn.className = 'text-red-500 hover:text-red-700';
+        btn.innerHTML = '<i class="fas fa-trash-alt"></i>';
+        btn.onclick = function() { deleteFile(file); };
+
+        li.appendChild(span);
+        li.appendChild(btn);
+        fileList.appendChild(li);
+    });
+
+    // Render Prompt Presets
+    const presetContainer = document.getElementById('promptPresets');
+    presetContainer.innerHTML = '';
+    
+    if (!currentConfig.saved_prompts) {
+        currentConfig.saved_prompts = {};
+    }
+
+    Object.keys(currentConfig.saved_prompts).forEach(name => {
+        const content = currentConfig.saved_prompts[name];
+        // Safe truncate
+        const preview = content.length > 60 ? content.substring(0, 60) + '...' : content;
+        
+        const tr = document.createElement('tr');
+        tr.className = 'bg-white border-b hover:bg-gray-50 transition';
+        tr.innerHTML = `
+            <td class="px-4 py-3 font-medium text-gray-900 whitespace-nowrap">${name}</td>
+            <td class="px-4 py-3 text-gray-500 truncate max-w-xs" title="${content.replace(/"/g, '&quot;')}">${preview}</td>
+            <td class="px-4 py-3 text-right whitespace-nowrap">
+                <button type="button" onclick="loadPrompt('${name}')" class="text-white bg-blue-500 hover:bg-blue-600 focus:ring-4 focus:outline-none focus:ring-blue-300 font-medium rounded-lg text-xs px-3 py-1.5 mr-2 text-center inline-flex items-center">
+                    <i class="fas fa-upload mr-1"></i> Pakai
+                </button>
+                <button type="button" onclick="deletePrompt('${name}')" class="text-white bg-red-500 hover:bg-red-600 focus:ring-4 focus:outline-none focus:ring-red-300 font-medium rounded-lg text-xs px-3 py-1.5 text-center inline-flex items-center">
+                    <i class="fas fa-trash-alt"></i>
+                </button>
+            </td>
+        `;
+        presetContainer.appendChild(tr);
+    });
+
+    // Render Provider List
+    const list = document.getElementById('providerList');
+    list.innerHTML = '';
+    
+    // Merge known providers with config providers
+    const allKeys = Object.keys(providersInfo);
+    
+    allKeys.forEach(key => {
+        const info = providersInfo[key];
+        const isActive = currentConfig.active_provider === key;
+        const div = document.createElement('div');
+        div.innerHTML = `
+            <label class="flex items-center justify-between p-3 rounded-lg border-2 cursor-pointer transition-all hover:bg-gray-50 ${isActive ? 'border-blue-500 bg-blue-50' : 'border-gray-200'}">
+                <div class="flex items-center gap-3">
+                    <input type="radio" name="active_provider" value="${key}" 
+                           class="form-radio text-blue-600 h-5 w-5"
+                           onchange="switchProvider('${key}')"
+                           ${isActive ? 'checked' : ''}>
+                    <span class="${info.color}"><i class="fas ${info.icon} w-6"></i></span>
+                    <span class="font-medium text-gray-700">${info.name}</span>
+                </div>
+            </label>
+        `;
+        list.appendChild(div);
+    });
+
+    // Render Settings Fields
+    const container = document.getElementById('settingsContainer');
+    container.innerHTML = '';
+    
+    // Ensure providers exist in config (even if empty)
+    allKeys.forEach(key => {
+        if (!currentConfig.providers[key]) {
+            currentConfig.providers[key] = { api_key: "", model: "", base_url: "" };
+        }
+        const data = currentConfig.providers[key];
+        const isHidden = currentConfig.active_provider !== key;
+        
+        const commonModels = getCommonModels(key);
+
+        const div = document.createElement('div');
+        div.id = `settings-${key}`;
+        div.className = isHidden ? 'hidden' : '';
+        div.innerHTML = `
+            <div class="mb-4">
+                <label class="block text-gray-700 text-sm font-bold mb-2">API Key</label>
+                <div class="flex gap-2">
+                    <input type="password" id="apikey-${key}" value="${data.api_key}" 
+                           class="flex-1 p-3 rounded-lg border focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="sk-...">
+                    <button type="button" onclick="toggleVisibility('apikey-${key}')" class="px-3 text-gray-400 hover:text-gray-600"><i class="fas fa-eye"></i></button>
+                </div>
+                ${key === 'qwen' ? '<p class="text-xs text-gray-500 mt-1"><i class="fas fa-key text-yellow-500"></i> Dapatkan API Key di <a href="https://bailian.console.alibabacloud.com/" target="_blank" class="text-blue-600 hover:underline">Alibaba Cloud Model Studio</a></p>' : ''}
+            </div>
+            <div class="mb-6">
+                <label class="block text-gray-700 text-sm font-bold mb-2">Model</label>
+                <div class="flex gap-2">
+                    <input type="text" id="model-${key}" value="${data.model}" list="models-${key}" class="w-full p-3 bg-gray-50 border rounded-lg mb-2" placeholder="Model Name (e.g. gpt-4o)">
+                    <button type="button" id="btn-fetch-${key}" onclick="fetchModels('${key}')" class="px-3 bg-gray-200 hover:bg-gray-300 rounded-lg mb-2 text-gray-600 border" title="Refresh Model List">
+                        <i class="fas fa-sync-alt"></i>
+                    </button>
+                </div>
+                <datalist id="models-${key}">
+                    ${commonModels.map(m => `<option value="${m}">`).join('')}
+                </datalist>
+                
+                ${key === 'byteplus' ? `
+                    <div class="mb-4">
+                        <label class="block text-gray-700 text-sm font-bold mb-2">Base URL (Endpoint)</label>
+                        <input type="text" id="baseurl-${key}" value="${data.base_url}" 
+                               class="w-full p-3 bg-gray-50 border rounded-lg" 
+                               placeholder="https://ark.ap-southeast.bytepluses.com/api/v3">
+                        <div class="flex gap-2 mt-2">
+                            <button type="button" onclick="setBytePlusUrl('global')" class="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded hover:bg-blue-200">BytePlus (Global)</button>
+                            <button type="button" onclick="setBytePlusUrl('china')" class="text-xs bg-green-100 text-green-700 px-2 py-1 rounded hover:bg-green-200">Volcengine (China)</button>
+                        </div>
+                        <div class="mt-3 text-xs text-gray-500 space-y-1">
+                            <p><i class="fas fa-key text-yellow-500"></i> <a href="https://console.byteplus.com/ark/region:ark+ap-southeast-1/apiKey" target="_blank" class="text-blue-600 hover:underline">Kelola API Key (Global)</a></p>
+                            <p><i class="fas fa-server text-purple-500"></i> <a href="https://console.byteplus.com/ark/region:ark+ap-southeast-1/endpoint" target="_blank" class="text-blue-600 hover:underline">Kelola Endpoint (Model)</a></p>
+                            <button type="button" onclick="showBytePlusGuide()" class="text-blue-600 hover:underline text-left"><i class="fas fa-question-circle"></i> Apa itu Endpoint/Deployment?</button>
+                        </div>
+                    </div>
+                ` : `
+                     <div class="bg-blue-50 text-blue-800 text-sm p-4 rounded-lg">
+                        <i class="fas fa-info-circle mr-1"></i> Endpoint: ${data.base_url || 'Default'}
+                    </div>
+                `}
+               
+            </div>
+        `;
+        container.appendChild(div);
+    });
+
+    // Render DB Config
+    const dbConfig = currentConfig.database || {host: '127.0.0.1', port: '3306', user: 'root', password: '', name: ''};
+    document.getElementById('db_host').value = dbConfig.host;
+    document.getElementById('db_port').value = dbConfig.port;
+    document.getElementById('db_user').value = dbConfig.user;
+    document.getElementById('db_password').value = dbConfig.password;
+    document.getElementById('db_name').value = dbConfig.name;
+
+    // Render Sheet Config
+    const sheetConfig = currentConfig.sheet || {spreadsheet_id: '', credentials_json: ''};
+    document.getElementById('sheet_id').value = sheetConfig.spreadsheet_id;
+    document.getElementById('sheet_creds').value = sheetConfig.credentials_json;
+
+    switchProvider(currentConfig.active_provider);
+}
+
+async function testDB() {
+    // Need to save first? No, we can ping using current values but better to save first or send values to test
+    // Simplest: Save config first then test
+    await saveConfigSilent();
+    
+    const btn = document.getElementById('btn-test-db');
+    const originalText = btn.innerHTML;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+    btn.disabled = true;
+
+    try {
+        const res = await fetch('/api/test-db', {method: 'POST'});
+        const data = await res.json();
+        if (data.success) {
+            Swal.fire('Berhasil', data.message, 'success');
+        } else {
+            Swal.fire('Gagal', data.message, 'error');
+        }
+    } catch(e) {
+        Swal.fire('Error', 'Gagal menghubungi server', 'error');
+    } finally {
+        btn.innerHTML = originalText;
+        btn.disabled = false;
+    }
+}
+
+async function fetchModels(provider) {
+    const apiKey = document.getElementById(`apikey-${provider}`).value;
+    const modelInput = document.getElementById(`model-${provider}`);
+    const dataList = document.getElementById(`models-${provider}`);
+    
+    // Get Base URL from input if exists (BytePlus), otherwise config
+    let baseUrl = "";
+    const baseUrlInput = document.getElementById(`baseurl-${provider}`);
+    if (baseUrlInput) {
+        baseUrl = baseUrlInput.value;
+    } else {
+        baseUrl = currentConfig.providers[provider]?.base_url || "";
+    }
+    
+    if (!apiKey) {
+        Swal.fire('Error', 'API Key harus diisi dulu', 'error');
+        return;
+    }
+
+    // Show loading
+    const btn = document.getElementById(`btn-fetch-${provider}`);
+    const originalText = btn.innerHTML;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+    btn.disabled = true;
+
+    try {
+        const res = await fetch(`/api/models?provider=${provider}&api_key=${encodeURIComponent(apiKey)}&base_url=${encodeURIComponent(baseUrl)}`);
+        const data = await res.json();
+
+        if (data.models && data.models.length > 0) {
+            // Update datalist
+            dataList.innerHTML = data.models.map(m => `<option value="${m}">`).join('');
+            Swal.fire({
+                toast: true,
+                position: 'top-end',
+                icon: 'success',
+                title: `Berhasil memuat ${data.models.length} model`,
+                timer: 2000,
+                showConfirmButton: false
+            });
+            modelInput.focus();
+        } else {
+             Swal.fire('Info', 'Tidak ada model ditemukan atau error: ' + (data.error || 'Unknown'), 'warning');
+        }
+    } catch (e) {
+        Swal.fire('Error', 'Gagal memuat model', 'error');
+    } finally {
+        btn.innerHTML = originalText;
+        btn.disabled = false;
+    }
+}
+
+function getCommonModels(provider) {
+    const models = {
+        'gemini': ['gemini-pro', 'gemini-1.5-flash', 'gemini-1.5-pro'],
+        'openai': ['gpt-3.5-turbo', 'gpt-4o', 'gpt-4-turbo'],
+        'groq': ['llama3-8b-8192', 'llama3-70b-8192', 'mixtral-8x7b-32768', 'gemma-7b-it'],
+        'qwen': ['qwen-turbo', 'qwen-plus', 'qwen-max'],
+        'byteplus': ['doubao-pro-4k', 'doubao-lite-4k']
+    };
+    return models[provider] || [];
+}
+
+function switchProvider(key) {
+    currentConfig.active_provider = key;
+    // Update Radio UI
+    document.querySelectorAll('#providerList label').forEach(l => {
+        l.classList.remove('border-blue-500', 'bg-blue-50');
+        l.classList.add('border-gray-200');
+        if(l.querySelector(`input[value="${key}"]`)) {
+            l.classList.add('border-blue-500', 'bg-blue-50');
+            l.classList.remove('border-gray-200');
+        }
+    });
+
+    // Update Settings UI
+    document.querySelectorAll('#settingsContainer > div').forEach(d => d.classList.add('hidden'));
+    document.getElementById(`settings-${key}`).classList.remove('hidden');
+    document.getElementById('providerTitle').innerText = providersInfo[key].name;
+}
+
+function toggleVisibility(id) {
+    const el = document.getElementById(id);
+    el.type = el.type === 'password' ? 'text' : 'password';
+}
+
+function setBytePlusUrl(type) {
+    const input = document.getElementById('baseurl-byteplus');
+    if (!input) return;
+    
+    if (type === 'global') {
+        input.value = "https://ark.ap-southeast.bytepluses.com/api/v3";
+    } else {
+        input.value = "https://ark.cn-beijing.volces.com/api/v3";
+    }
+}
+
+function showBytePlusGuide() {
+    Swal.fire({
+        title: 'Cara Setup BytePlus',
+        html: `
+            <div class="text-left text-sm space-y-3">
+                <p>Berbeda dengan OpenAI, di BytePlus Anda tidak bisa langsung pakai nama model. Anda harus membuat "Endpoint" dulu.</p>
+                <ol class="list-decimal pl-5 space-y-1">
+                    <li>Buka <a href="https://console.byteplus.com/ark/region:ark+ap-southeast-1/endpoint" target="_blank" class="text-blue-600 underline">Console ModelArk</a>.</li>
+                    <li>Pilih menu <b>Model Deployment (Endpoint)</b>.</li>
+                    <li>Klik <b>Create New Endpoint</b>.</li>
+                    <li>Pilih model (misal: <i>Doubao-pro-4k</i>) lalu Deploy.</li>
+                    <li>Setelah status <i>Running</i>, copy <b>Endpoint ID</b> (contoh: <code>ep-2024...</code>).</li>
+                </ol>
+                <p class="mt-2 text-gray-600">Nah, <b>Endpoint ID</b> itulah yang nanti akan muncul otomatis saat Anda klik tombol "Refresh Model" di aplikasi ini.</p>
+            </div>
+        `,
+        icon: 'info',
+        width: '600px'
+    });
+}
+
+async function saveConfigSilent() {
+    currentConfig.system_prompt = document.getElementById('system_prompt').value;
+    
+    currentConfig.database = {
+        host: document.getElementById('db_host').value,
+        port: document.getElementById('db_port').value,
+        user: document.getElementById('db_user').value,
+        password: document.getElementById('db_password').value,
+        name: document.getElementById('db_name').value
+    };
+
+    currentConfig.sheet = {
+        spreadsheet_id: document.getElementById('sheet_id').value,
+        credentials_json: document.getElementById('sheet_creds').value
+    };
+
+    Object.keys(currentConfig.providers).forEach(key => {
+        const apiKeyEl = document.getElementById(`apikey-${key}`);
+        const modelEl = document.getElementById(`model-${key}`);
+        const baseUrlEl = document.getElementById(`baseurl-${key}`);
+
+        if(apiKeyEl) currentConfig.providers[key].api_key = apiKeyEl.value;
+        if(modelEl) currentConfig.providers[key].model = modelEl.value;
+        if(baseUrlEl) currentConfig.providers[key].base_url = baseUrlEl.value;
+    });
+
+    await fetch('/api/config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(currentConfig)
+    });
+}
+
+async function testSheet() {
+    await saveConfigSilent();
+    
+    const btn = document.getElementById('btn-test-sheet');
+    const originalText = btn.innerHTML;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Testing...';
+    btn.disabled = true;
+
+    try {
+        const res = await fetch('/api/test-sheet', {method: 'POST'});
+        const data = await res.json();
+        if (data.success) {
+            Swal.fire('Berhasil', data.message, 'success');
+        } else {
+            Swal.fire('Gagal', data.message, 'error');
+        }
+    } catch(e) {
+        Swal.fire('Error', 'Gagal menghubungi server', 'error');
+    } finally {
+        btn.innerHTML = originalText;
+        btn.disabled = false;
+    }
+}
+
+async function saveConfig(e) {
+    e.preventDefault();
+    
+    // Update config object from DOM
+    currentConfig.system_prompt = document.getElementById('system_prompt').value;
+    
+    // DB Config
+    currentConfig.database = {
+        host: document.getElementById('db_host').value,
+        port: document.getElementById('db_port').value,
+        user: document.getElementById('db_user').value,
+        password: document.getElementById('db_password').value,
+        name: document.getElementById('db_name').value
+    };
+
+    // Sheet Config
+    currentConfig.sheet = {
+        spreadsheet_id: document.getElementById('sheet_id').value,
+        credentials_json: document.getElementById('sheet_creds').value
+    };
+
+    Object.keys(currentConfig.providers).forEach(key => {
+        const apiKeyEl = document.getElementById(`apikey-${key}`);
+        const modelEl = document.getElementById(`model-${key}`);
+        const baseUrlEl = document.getElementById(`baseurl-${key}`);
+
+        if(apiKeyEl) currentConfig.providers[key].api_key = apiKeyEl.value;
+        if(modelEl) currentConfig.providers[key].model = modelEl.value;
+        if(baseUrlEl) currentConfig.providers[key].base_url = baseUrlEl.value;
+    });
+
+    const res = await fetch('/api/config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(currentConfig)
+    });
+    
+    if(res.ok) {
+        Swal.fire('Berhasil!', 'Pengaturan disimpan.', 'success');
+    } else {
+        Swal.fire('Gagal!', 'Terjadi kesalahan.', 'error');
+    }
+}
+
+async function controlServer(cmd) {
+    try {
+        const res = await fetch('/api/control', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({command: cmd})
+        });
+
+        let data = {};
+        try {
+            data = await res.json();
+        } catch (e) {
+            // Jika respons bukan JSON valid
+            Swal.fire('Gagal', 'Server mengirim respons tidak valid.', 'error');
+            return;
+        }
+
+        if (res.ok && data.success) {
+            Swal.fire('Berhasil', data.message || 'Perintah berhasil dijalankan.', 'success');
+        } else {
+            Swal.fire('Gagal', data.message || 'Perintah gagal dijalankan.', 'error');
+        }
+    } catch (e) {
+        Swal.fire('Error', 'Tidak bisa terhubung ke server.', 'error');
+    }
+}
+
+// Status Polling
+let currentQr = null;
+setInterval(async () => {
+    try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+        
+        const statusText = document.getElementById('wa-status-text');
+        const indicator = document.getElementById('status-indicator');
+        const qrContainer = document.getElementById('qrcode-container');
+        const qrDiv = document.getElementById('qrcode');
+        const btnLogout = document.getElementById('btnLogout');
+
+        if (data.status === 'CONNECTED') {
+            statusText.innerHTML = '<span class="text-green-600"><i class="fas fa-check-circle"></i> TERHUBUNG</span>';
+            indicator.className = 'absolute top-0 left-0 w-full h-1 bg-green-500';
+            qrContainer.classList.add('hidden');
+            btnLogout.classList.remove('hidden'); // Show logout when connected
+            currentQr = null;
+        } else if (data.status === 'QR_READY' && data.qr) {
+            statusText.innerHTML = '<span class="text-orange-500">SCAN QR DI BAWAH</span>';
+            indicator.className = 'absolute top-0 left-0 w-full h-1 bg-orange-500';
+            btnLogout.classList.add('hidden'); // Hide logout when scanning
+            
+            if (currentQr !== data.qr) {
+                qrContainer.classList.remove('hidden');
+                qrDiv.innerHTML = '';
+                new QRCode(qrDiv, {text: data.qr, width: 150, height: 150});
+                currentQr = data.qr;
+            }
+        } else {
+            statusText.innerHTML = '<span class="text-gray-500">' + data.status + '</span>';
+            indicator.className = 'absolute top-0 left-0 w-full h-1 bg-gray-300';
+            qrContainer.classList.add('hidden');
+            btnLogout.classList.add('hidden'); // Hide logout otherwise
+        }
+    } catch(e) {}
+}, 2000);
+
+// Init
+loadData();
+
+async function savePromptPreset() {
+    const { value: name } = await Swal.fire({
+        title: 'Nama Template',
+        input: 'text',
+        inputLabel: 'Beri nama untuk instruksi ini',
+        showCancelButton: true,
+        inputValidator: (value) => {
+            if (!value) {
+                return 'Nama tidak boleh kosong!'
+            }
+        }
+    });
+
+    if (name) {
+        const content = document.getElementById('system_prompt').value;
+        if(!currentConfig.saved_prompts) currentConfig.saved_prompts = {};
+        
+        currentConfig.saved_prompts[name] = content;
+        
+        // Save via existing saveConfig logic but simpler
+        // We just re-render and let user click "SIMPAN PENGATURAN" or auto-save?
+        // User asked for CRUD, usually implies persistence.
+        // Let's auto-save the config when modifying presets to be safe.
+        
+        await saveConfigSilent();
+        renderUI();
+        Swal.fire('Tersimpan', `Template "${name}" berhasil disimpan.`, 'success');
+    }
+}
+
+function loadPrompt(name) {
+    if(currentConfig.saved_prompts && currentConfig.saved_prompts[name]) {
+        document.getElementById('system_prompt').value = currentConfig.saved_prompts[name];
+        Swal.fire({
+            toast: true,
+            position: 'top-end',
+            icon: 'success',
+            title: 'Template dimuat',
+            showConfirmButton: false,
+            timer: 1500
+        });
+    }
+}
+
+async function deletePrompt(name) {
+    const result = await Swal.fire({
+        title: 'Hapus Template?',
+        text: `Anda yakin ingin menghapus "${name}"?`,
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonColor: '#d33',
+        confirmButtonText: 'Ya, Hapus'
+    });
+
+    if (result.isConfirmed) {
+        delete currentConfig.saved_prompts[name];
+        await saveConfigSilent();
+        renderUI();
+        Swal.fire('Terhapus', '', 'success');
+    }
+}
+
+// Knowledge Base Functions
+function switchTab(tab) {
+    if (tab === 'url') {
+        document.getElementById('content-url').classList.remove('hidden');
+        document.getElementById('content-file').classList.add('hidden');
+        document.getElementById('tab-url').classList.add('text-blue-600', 'border-b-2', 'border-blue-600');
+        document.getElementById('tab-url').classList.remove('text-gray-500');
+        document.getElementById('tab-file').classList.remove('text-blue-600', 'border-b-2', 'border-blue-600');
+        document.getElementById('tab-file').classList.add('text-gray-500');
+    } else {
+        document.getElementById('content-url').classList.add('hidden');
+        document.getElementById('content-file').classList.remove('hidden');
+        document.getElementById('tab-file').classList.add('text-blue-600', 'border-b-2', 'border-blue-600');
+        document.getElementById('tab-file').classList.remove('text-gray-500');
+        document.getElementById('tab-url').classList.remove('text-blue-600', 'border-b-2', 'border-blue-600');
+        document.getElementById('tab-url').classList.add('text-gray-500');
+    }
+}
+
+async function addURL() {
+    const urlInput = document.getElementById('new_url');
+    const url = urlInput.value.trim();
+    if (!url) return;
+
+    if (!currentConfig.knowledge_urls) currentConfig.knowledge_urls = [];
+    if (!currentConfig.knowledge_urls.includes(url)) {
+        currentConfig.knowledge_urls.push(url);
+        await saveConfigSilent();
+        renderUI();
+        urlInput.value = '';
+        Swal.fire({
+            toast: true,
+            position: 'top-end',
+            icon: 'success',
+            title: 'URL ditambahkan',
+            showConfirmButton: false,
+            timer: 1500
+        });
+    } else {
+        Swal.fire('Info', 'URL sudah ada dalam daftar', 'info');
+    }
+}
+
+async function removeURL(url) {
+    if (!currentConfig.knowledge_urls) return;
+    currentConfig.knowledge_urls = currentConfig.knowledge_urls.filter(u => u !== url);
+    await saveConfigSilent();
+    renderUI();
+}
+
+async function uploadFile() {
+    const fileInput = document.getElementById('file_upload');
+    const file = fileInput.files[0];
+    if (!file) {
+        Swal.fire('Error', 'Pilih file terlebih dahulu', 'error');
+        return;
+    }
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+        const res = await fetch('/api/upload', {
+            method: 'POST',
+            body: formData
+        });
+
+        if (!res.ok) {
+            let errorMsg = res.statusText;
+            try {
+                const errData = await res.json();
+                errorMsg = errData.error || errorMsg;
+            } catch (e) {
+                // If not JSON, try text
+                const text = await res.text();
+                if (text) errorMsg = text;
+            }
+            throw new Error(errorMsg);
+        }
+
+        const data = await res.json();
+        
+        if (data.success) {
+            // Backend updates config, so we just need to refresh local state
+            await loadData(); 
+            
+            fileInput.value = '';
+            Swal.fire('Sukses', 'File berhasil diupload', 'success');
+        } else {
+            Swal.fire('Gagal', data.error, 'error');
+        }
+    } catch (e) {
+        console.error(e);
+        Swal.fire('Error', 'Gagal upload: ' + e.message, 'error');
+    }
+}
+
+async function deleteFile(filename) {
+    const result = await Swal.fire({
+        title: 'Hapus File?',
+        text: `Hapus "${filename}" dari pengetahuan bot?`,
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonColor: '#d33',
+        confirmButtonText: 'Ya, Hapus'
+    });
+
+    if (result.isConfirmed) {
+        try {
+            console.log("Deleting:", filename);
+            const res = await fetch('/api/delete-file', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({filename: filename})
+            });
+            
+            const data = await res.json();
+            
+            if (res.ok) {
+                // Backend updated config file.
+                await loadData(); // Refresh local state
+                Swal.fire('Terhapus', 'File berhasil dihapus.', 'success');
+            } else {
+                 Swal.fire('Gagal', data.message || 'Gagal menghapus file', 'error');
+            }
+        } catch(e) {
+            console.error(e);
+            Swal.fire('Error', 'Gagal menghapus file: ' + e.message, 'error');
+        }
+    }
+}
+</script>
+
+</body>
+</html>

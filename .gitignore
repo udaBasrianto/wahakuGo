@@ -1,0 +1,32 @@
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Local Database
+*.db
+*.db-shm
+*.db-wal
+wahaku.db
+
+# Logs
+*.log
+
+# Uploads (Exclude content but keep folder)
+uploads/*
+!uploads/.gitkeep
+deploy/uploads/*
+!deploy/uploads/.gitkeep
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Config (Optional: Exclude if contains sensitive keys, but including for convenience as per user request context)
+# config.json 
+# If you want to keep config private, uncomment above line. For now, we assume user wants to deploy it.
+
+# Editor
+.vscode/
+.idea/

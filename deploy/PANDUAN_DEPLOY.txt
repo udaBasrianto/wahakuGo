@@ -1,0 +1,40 @@
+PANDUAN DEPLOY KE AAPANEL
+=========================
+
+1. Persiapan File
+   - Upload semua isi folder ini ke server aaPanel Anda.
+   - Disarankan buat folder baru, misalnya: `/www/wwwroot/wahaku`
+   - Pastikan struktur filenya seperti ini:
+     /www/wwwroot/wahaku/
+       ├── wahaku-linux      (Binary file aplikasi)
+       ├── config.json       (File konfigurasi)
+       ├── views/            (Folder tampilan web)
+       ├── uploads/          (Folder untuk file upload)
+       └── supervisor_wahaku.conf
+
+2. Set Permission
+   - Buka Terminal di aaPanel atau SSH.
+   - Jalankan perintah ini agar aplikasi bisa dieksekusi:
+     chmod +x /www/wwwroot/wahaku/wahaku-linux
+
+3. Konfigurasi Supervisor (Agar jalan otomatis 24 jam)
+   - Di menu aaPanel, cari "App Store" -> Install "Supervisor" (jika belum ada).
+   - Buka Supervisor -> "Add Daemon".
+   - Isi form sebagai berikut:
+     * Name: wahaku
+     * User: root
+     * Run Dir: /www/wwwroot/wahaku/
+     * Start Command: /www/wwwroot/wahaku/wahaku-linux
+   - Atau jika Anda bisa import config, gunakan isi file `supervisor_wahaku.conf`.
+
+4. Cek Status
+   - Jika status di Supervisor sudah "Running" (Hijau), berarti aman.
+   - Cek log jika ada error dengan klik tombol "Log".
+
+5. Akses Web
+   - Buka Security di aaPanel, pastikan Port 3000 (atau port yg Anda set di config.json) sudah dibuka (Release).
+   - Akses via browser: http://IP-VPS-ANDA:3000
+
+Catatan:
+- Database SQLite (wahaku.db) akan otomatis dibuat saat aplikasi pertama kali dijalankan.
+- Scan QR Code WhatsApp bisa dilakukan lewat dashboard web setelah aplikasi jalan.
