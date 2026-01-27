@@ -80,6 +80,7 @@ var (
 	dbSchema      string     // Table schema for AI
 	sheetsService *sheets.Service // Google Sheets Service
 	sheetSchema   string          // Sheet names & headers for AI
+	store         *session.Store  // Session Store
 )
 
 func main() {
@@ -138,10 +139,55 @@ func main() {
 	os.MkdirAll("uploads", 0755)
 
 	// Serve Static Files
+	app.Get("/login", func(c *fiber.Ctx) error {
+		return c.SendFile("./views/login.html")
+	})
 	app.Static("/", "./views")
 
 	// API Routes
 	api := app.Group("/api")
+
+	// Auth Routes
+	auth := api.Group("/auth")
+	auth.Post("/login", func(c *fiber.Ctx) error {
+		var req struct {
+			Username string `json:"username"`
+			Password string `json:"password"`
+		}
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid Request"})
+		}
+
+		if req.Username == cfg.AdminUsername && req.Password == cfg.AdminPassword {
+			sess, err := store.Get(c)
+			if err != nil {
+				return c.Status(500).JSON(fiber.Map{"success": false, "message": "Session Error"})
+			}
+
+			sess.Set("authenticated", true)
+			if err := sess.Save(); err != nil {
+				return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to save session"})
+			}
+
+			return c.JSON(fiber.Map{"success": true})
+		}
+
+		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Username atau Password salah"})
+	})
+
+	auth.Post("/logout", func(c *fiber.Ctx) error {
+		sess, err := store.Get(c)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Session Error"})
+		}
+
+		if err := sess.Destroy(); err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to destroy session"})
+		}
+
+		return c.JSON(fiber.Map{"success": true})
+	})
+
 	api.Get("/status", func(c *fiber.Ctx) error {
 		mu.Lock()
 		defer mu.Unlock()
