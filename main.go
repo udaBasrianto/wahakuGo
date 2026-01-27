@@ -130,10 +130,39 @@ func main() {
 	}()
 
 	// 5. Setup Fiber
+	store = session.New(session.Config{
+		Expiration: 24 * time.Hour,
+	})
+
 	app := fiber.New(fiber.Config{
 		BodyLimit: 50 * 1024 * 1024, // 50MB Limit
 	})
 	app.Use(cors.New())
+
+	// Middleware Auth
+	app.Use(func(c *fiber.Ctx) error {
+		// Whitelist Routes
+		if c.Path() == "/login" || strings.HasPrefix(c.Path(), "/api/auth") {
+			return c.Next()
+		}
+
+		// Check Session
+		sess, err := store.Get(c)
+		if err != nil {
+			return c.Redirect("/login")
+		}
+
+		if sess.Get("authenticated") != true {
+			// If API request, return JSON 401
+			if strings.HasPrefix(c.Path(), "/api") {
+				return c.Status(401).JSON(fiber.Map{"success": false, "message": "Unauthorized"})
+			}
+			// Otherwise redirect to login
+			return c.Redirect("/login")
+		}
+
+		return c.Next()
+	})
 
 	// Ensure uploads directory exists
 	os.MkdirAll("uploads", 0755)
