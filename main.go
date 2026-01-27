@@ -19,6 +19,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
+	"github.com/gofiber/fiber/v2/middleware/session"
 	"github.com/ledongthuc/pdf"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -53,6 +54,8 @@ type SheetConfig struct {
 
 type Config struct {
 	ActiveProvider string                    `json:"active_provider"`
+	AdminUsername  string                    `json:"admin_username"`
+	AdminPassword  string                    `json:"admin_password"`
 	SystemPrompt   string                    `json:"system_prompt"`
 	SavedPrompts   map[string]string         `json:"saved_prompts"`
 	KnowledgeURLs  []string                  `json:"knowledge_urls"`
@@ -814,6 +817,14 @@ func loadConfig() {
 	
 	if cfg.AppPort == "" {
 		cfg.AppPort = "3000"
+	}
+
+	// Default Credentials
+	if cfg.AdminUsername == "" {
+		cfg.AdminUsername = "admin"
+	}
+	if cfg.AdminPassword == "" {
+		cfg.AdminPassword = "password123"
 	}
 
 	// Initial Refresh
