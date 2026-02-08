@@ -8,15 +8,26 @@ Anda bisa memilih dua metode: **Upload Manual** atau **Via Git (Recommended)**.
 ### Metode A: Via Git (Paling Mudah & Cepat)
 Gunakan metode ini jika VPS Anda memiliki akses internet.
 
+**Langkah 0: Setup SSH Key (Wajib jika Repo Private)**
+Jika repository Anda **Private**, Anda harus menambahkan SSH Key VPS ke GitHub.
+1. Copy Public Key dari VPS/aaPanel (biasanya diawali `ssh-ed25519` atau `ssh-rsa`).
+2. Buka GitHub -> Repository Ini -> **Settings**.
+3. Menu **Deploy keys** -> **Add deploy key**.
+4. Paste key tersebut, beri judul "aaPanel VPS", dan centang "Allow write access" (opsional).
+5. Klik **Add key**.
+
+**Langkah 1: Clone & Setup**
 1. **Buka Terminal aaPanel** (atau SSH ke server).
 2. Masuk ke folder root web:
    ```bash
    cd /www/wwwroot/
    ```
-3. Clone repository (Ganti URL dengan repo Anda):
+3. Clone repository (Gunakan URL SSH jika sudah setup key):
    ```bash
-   git clone https://github.com/udaBasrianto/wahakuGo.git wahaku
+   git clone git@github.com:udaBasrianto/wahakuGo.git wahaku
    ```
+   *Atau jika public:* `git clone https://github.com/udaBasrianto/wahakuGo.git wahaku`
+
 4. Masuk ke folder aplikasi:
    ```bash
    cd wahaku/wa-server/go-app
