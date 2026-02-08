@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Daftar Akun - Wahaku</title>
+    <link href="/styles.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+</head>
+<body class="bg-gray-100 flex items-center justify-center h-screen">
+    <div class="bg-white p-8 rounded-lg shadow-lg w-96">
+        <div class="text-center mb-8">
+            <h1 class="text-2xl font-bold text-gray-800">Daftar Wahaku</h1>
+            <p class="text-gray-500 text-sm">Buat akun baru untuk memulai</p>
+        </div>
+
+        <!-- Register Form -->
+        <form id="registerForm" class="space-y-4">
+            <div>
+                <label class="block text-gray-700 text-sm font-bold mb-2" for="username">Nomor WhatsApp</label>
+                <input class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline" id="username" type="tel" placeholder="08xxxxxxxxxx" required>
+            </div>
+            <!-- Password removed for simple OTP registration -->
+            <div class="flex items-center justify-between">
+                <button class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline w-full" type="submit">
+                    Daftar
+                </button>
+            </div>
+        </form>
+
+        <!-- OTP Form (Hidden Initially) -->
+        <form id="otpForm" class="space-y-4 hidden">
+            <div class="text-center mb-4">
+                <div class="bg-green-100 text-green-700 p-3 rounded text-sm">
+                    Kode OTP telah dikirim ke WhatsApp Anda.
+                </div>
+            </div>
+            <div>
+                <label class="block text-gray-700 text-sm font-bold mb-2" for="otp">Kode OTP</label>
+                <input class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline text-center text-xl tracking-widest" id="otp" type="text" placeholder="000000" maxlength="6" required>
+            </div>
+            <div class="flex items-center justify-between">
+                <button class="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline w-full" type="submit">
+                    Verifikasi & Login
+                </button>
+            </div>
+            
+            <div class="text-center mt-4">
+                <p class="text-sm text-gray-600">
+                    Tidak menerima kode? 
+                    <button type="button" id="resendOtpBtn" class="text-blue-600 hover:text-blue-800 font-bold disabled:text-gray-400" onclick="resendOTP()">
+                        Kirim Ulang
+                    </button>
+                </p>
+                <p id="countdown" class="text-xs text-gray-500 mt-1 hidden">Tunggu <span id="timer">60</span> detik</p>
+            </div>
+        </form>
+
+        <div class="mt-4 text-center">
+            <p class="text-sm text-gray-600">
+                Sudah punya akun? 
+                <a href="/login" class="text-blue-600 hover:text-blue-800 font-bold">Masuk di sini</a>
+            </p>
+        </div>
+
+        <div class="mt-8 text-center text-xs text-gray-500">
+            &copy; 2026 Akhimedia. All rights reserved.
+        </div>
+    </div>
+
+    <script>
+        let registeredPhone = '';
+        let resendTimer = null;
+
+        document.getElementById('registerForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            const username = document.getElementById('username').value;
+
+            try {
+                const response = await fetch('/api/auth/register', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username }) // Only username
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.success) {
+                    if (data.require_otp) {
+                        registeredPhone = username;
+                        document.getElementById('registerForm').classList.add('hidden');
+                        document.getElementById('otpForm').classList.remove('hidden');
+                        Swal.fire({
+                            icon: 'success',
+                            title: 'Pendaftaran Berhasil',
+                            text: data.message,
+                            timer: 3000,
+                            showConfirmButton: false
+                        });
+                        startResendTimer();
+                    } else {
+                        // Should not happen with current backend logic but safe fallback
+                        Swal.fire({
+                            icon: 'success',
+                            title: 'Pendaftaran Berhasil',
+                            text: 'Silakan login.',
+                            timer: 2000
+                        }).then(() => window.location.href = '/login');
+                    }
+                } else {
+                    Swal.fire({
+                        icon: 'error',
+                        title: 'Gagal Mendaftar',
+                        text: data.message || 'Terjadi kesalahan saat mendaftar.'
+                    });
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                Swal.fire({ icon: 'error', title: 'Error', text: 'Terjadi kesalahan sistem' });
+            }
+        });
+
+        document.getElementById('otpForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            const otp = document.getElementById('otp').value;
+
+            try {
+                const response = await fetch('/api/auth/verify', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username: registeredPhone, otp })
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.success) {
+                    Swal.fire({
+                        icon: 'success',
+                        title: 'Verifikasi Berhasil',
+                        text: 'Mengalihkan ke dashboard...',
+                        timer: 1500,
+                        showConfirmButton: false
+                    }).then(() => {
+                        window.location.href = '/';
+                    });
+                } else {
+                    Swal.fire({
+                        icon: 'error',
+                        title: 'Gagal Verifikasi',
+                        text: data.message || 'Kode OTP salah'
+                    });
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                Swal.fire({ icon: 'error', title: 'Error', text: 'Terjadi kesalahan sistem' });
+            }
+        });
+
+        function startResendTimer() {
+            const btn = document.getElementById('resendOtpBtn');
+            const countdownEl = document.getElementById('countdown');
+            const timerEl = document.getElementById('timer');
+            
+            btn.disabled = true;
+            countdownEl.classList.remove('hidden');
+            
+            let timeLeft = 60;
+            timerEl.innerText = timeLeft;
+            
+            if (resendTimer) clearInterval(resendTimer);
+            
+            resendTimer = setInterval(() => {
+                timeLeft--;
+                timerEl.innerText = timeLeft;
+                if (timeLeft <= 0) {
+                    clearInterval(resendTimer);
+                    btn.disabled = false;
+                    countdownEl.classList.add('hidden');
+                }
+            }, 1000);
+        }
+
+        async function resendOTP() {
+            if (!registeredPhone) return;
+            
+            try {
+                const response = await fetch('/api/auth/resend-otp', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username: registeredPhone })
+                });
+                const data = await response.json();
+
+                if (response.ok && data.success) {
+                    Swal.fire({
+                        icon: 'success',
+                        title: 'OTP Dikirim',
+                        text: 'Kode OTP baru telah dikirim ke WhatsApp Anda.',
+                        timer: 2000,
+                        showConfirmButton: false
+                    });
+                    startResendTimer();
+                } else {
+                    Swal.fire('Gagal', data.message || 'Gagal mengirim ulang OTP', 'error');
+                }
+            } catch (e) {
+                Swal.fire('Error', 'Terjadi kesalahan koneksi', 'error');
+            }
+        }
+    </script>
+</body>
+</html>

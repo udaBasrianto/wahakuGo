@@ -1,0 +1,39 @@
+PANDUAN DEPLOY DI AAPANEL (LINUX)
+=================================
+
+Cara Auto Run di aaPanel berbeda dengan Windows. Di aaPanel, kita menggunakan "Supervisor" agar aplikasi jalan terus di background (24 jam).
+
+LANGKAH 1: UPLOAD FILE
+1. Buka File Manager di aaPanel.
+2. Buat folder baru, misal: /www/wwwroot/wahaku
+3. Upload semua file dari folder "deploy" ini ke sana:
+   - wahaku-linux (file aplikasi utama)
+   - config.json
+   - folder "views"
+   - folder "uploads" (jika ada)
+
+4. PENTING: Beri izin eksekusi ke file aplikasi.
+   - Klik kanan pada file "wahaku-linux" -> Permission -> set ke 755 -> OK.
+
+LANGKAH 2: SETUP SUPERVISOR (AUTO RUN)
+1. Di aaPanel, buka "App Store".
+2. Cari dan install "Supervisor" (Daemon process manager).
+3. Buka setting Supervisor -> "Add Daemon".
+4. Isi form seperti ini:
+   - Name: wahaku
+   - Run User: root
+   - Run Dir: /www/wwwroot/wahaku/
+   - Start Command: /www/wwwroot/wahaku/wahaku-linux
+   - Processes: 1
+5. Klik "Confirm".
+
+LANGKAH 3: CEK STATUS
+- Setelah ditambahkan, status harusnya "Running" (Hijau).
+- Aplikasi sekarang sudah jalan otomatis. Jika server restart, aplikasi akan nyala sendiri.
+
+LANGKAH 4: BUKA DI BROWSER
+- Pastikan port 3000 sudah dibuka di menu "Security" aaPanel.
+- Akses: http://IP-VPS-ANDA:3000
+
+Catatan:
+Jika Anda ingin mengganti port, edit file config.json sebelum menjalankan supervisor.

@@ -1,8 +1,7 @@
 {
-  "active_provider": "byteplus",
+  "active_provider": "groq",
   "admin_username": "admin",
   "admin_password": "password123",
-  "app_port": "3000",
   "system_prompt": "kamu adalah admin dari Akhimedia, yg bergerka dibidang jasa pembuatan website, appliakasi, websystem dan semisal itu. \nWebsite kita akhimedia.id, kamu bisa merujuk informasi / profile perusahan kita di web akhimedia.id ( website kita hanya ini)",
   "saved_prompts": {
     "akhimedia": "kamu adalah admin dari Akhimedia, yg bergerka dibidang jasa pembuatan website, appliakasi, websystem dan semisal itu. \nWebsite kita akhimedia.id, kamu bisa merujuk informasi / profile perusahan kita di web akhimedia.id ( website kita hanya ini)"
@@ -10,15 +9,11 @@
   "knowledge_urls": [
     "https://akhimedia.id/"
   ],
-  "knowledge_files": [
-    "struktur_poltekkes_gabungan_final.pdf",
-    "Tiga Pondasi.pdf",
-    "poltkes.pdf"
-  ],
+  "knowledge_files": [],
   "providers": {
     "byteplus": {
       "api_key": "b2e8c7be-d03c-40d2-8ae8-1370362aa63f",
-      "model": "deepseek-v3-2-251201",
+      "model": "glm-4-7-251222",
       "base_url": "https://ark.ap-southeast.bytepluses.com/api/v3"
     },
     "gemini": {
@@ -28,7 +23,7 @@
     },
     "groq": {
       "api_key": "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",
-      "model": "gemma-7b-it",
+      "model": "meta-llama/llama-4-maverick-17b-128e-instruct",
       "base_url": "https://api.groq.com/openai/v1"
     },
     "openai": {
@@ -40,17 +35,24 @@
       "api_key": "",
       "model": "qwen-turbo",
       "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    },
+    "vertex": {
+      "api_key": "{\"type\":\"service_account\",\"project_id\":\"proyek-gemini-antigravity\",\"private_key_id\":\"7066de2546a1f4bfe40982076d700a8b7a7de776\",\"private_key\":\"-----BEGIN PRIVATE KEY-----\\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDYJdBsvyDBZinL\\nf1jFCgEVFBsJU9sNo4Ec+DCy9LRMzSMA84v5hB9EZjTb77qxkZdinJN7NRacVRJo\\nlItEka24tVa0vRp+UkvrzRROrFR7hbgJTZpTuTUk/84EZVTBzOHcLNlwdyAzVVHE\\n3F/+nLnaWqMnZR8dJ/23K9K/fplpCAbHb9wsz+XD5cQRzxpXZdEkvfr4n12RovmT\\nBqWn9culEZSA2CU+aQ1meonEZMCBDxI/W6UjNOPeX+cXQDp4TSE3171Sl3fOEHMN\\nRLP4ad/wkSYbYXe3NkUG6l2TR9yRw7dgJ/CzOKYM6JQLb198iqE15iUvkPaa2Njb\\n6nlfCFefAgMBAAECggEAMRNk30wGA+NOWgXwAczjsgV+nf+MHOyixBEV/YvR5B4v\\ndGfXwC9faghKuCUWHnsQBDPIyJClMZmfNF+Fv2vUJbwGk8Lb4RKOaluF4Nb/14vk\\n3TfhcmD60AvEmvrm45nBLlyAgiiKBx24Exp2MTkkeY9au/cZuWT7Fju8/f2gl1fw\\nRbFjPKEr6lD9qrjW+qcNkBLCtXkvIN4nVtuGCWhWNSNsnfo/9RT22zwi7MLc5dZf\\nVdJ6XHle2T7ArRoF4avzWv23yT290F//mn7ZyTZKCBLZr7/mqPKKUzN50y5trLTA\\n6f++p9MXKRYJx3HwaLALFWbZmuE5TIp6w63r9jI3AQKBgQD13mOsdtkT8i3I3jih\\n3ce96MYmguPQjDt0XUKZLjTOKU4Gcczdzed062spwYEkETpIav5eo/94OdPGVOou\\n840NnwafcWZ89GiiKfiI6koVV28pkthvHJTh8fLDjy6euBAlIuJvNWIeIJxWpL8f\\nqlO/PNMZmftDPDzmFiMeSTr5WwKBgQDhDeeyf2KT9ht9wLBRDTIHRmw4hB4ElxF+\\nyumJ6dD2XrHoUqRdMnxvdlQ5UhEjuCuvMaY37PoK+nj2tt2zgbDZq8q83YSKTDR6\\njFbUe2eUrHSJbR5k8S6LLCCq99hDcIHJ3Xd0su9Sli/Wfm9tDsQH3coduOh8FDi5\\n0teaU35qDQKBgQDXqiDoEL/NHStH/JTUdwNT87CL61gFgFxOb9eRIdSz2ctVH9FB\\n5fDWwAGZ+OBcULg8+YzyWwwl2yOF3sokMQJTJmDazs/FX2XAiOw2vLwLCEy7vNEY\\ndYuqvV3iZ9/O3UlcKcNRJRRRtO0tmwkCr5cSMjpBRK3/hgEtGdHoKPgP7QKBgAFu\\nljfTiawJV9lv/W82l0fmkc+2P36l+22EGwJOo469wYIJ7JPPO212IkkPFZ7VkCmY\\nNkeK0Xh6aYSgWz7GJ3rrFeonuq0qmPbip7bIZjtS8ZbiQ9w+kJ5AFKEh3JVpRNok\\n95qdfNpYrEtAGLNn8aVfKucPgyMu+cFs7wRDXb2NAoGBAOs2ghYV7KB8tuw7gKj5\\n/V/l8gXr9muJd5AlzKyvA/55o2f1MZlLfc3iN+cIpr9oBGBq0Y4EkpoB8wA6ZyZD\\n3oFbs8+fGg0efIhGqJpvkx66eFNgxhNYpbRh0Dp5gAT9qYh0nVAlkuc/dJYEs5ec\\n5rJJx7Bfdf2mnP2dHRMNhYZk\\n-----END PRIVATE KEY-----\\n\",\"client_email\":\"antigravity-gemini@proyek-gemini-antigravity.iam.gserviceaccount.com\",\"client_id\":\"107179841830942135043\",\"auth_uri\":\"https://accounts.google.com/o/oauth2/auth\",\"token_uri\":\"https://oauth2.googleapis.com/token\",\"auth_provider_x509_cert_url\":\"https://www.googleapis.com/oauth2/v1/certs\",\"client_x509_cert_url\":\"https://www.googleapis.com/robot/v1/metadata/x509/antigravity-gemini%40proyek-gemini-antigravity.iam.gserviceaccount.com\",\"universe_domain\":\"googleapis.com\"}",
+      "model": "gemini-3.0-pro-001",
+      "base_url": "asia-southeast2"
     }
   },
   "database": {
-    "host": "",
-    "port": "",
-    "user": "",
-    "password": "",
+    "type": "postgres",
+    "host": "localhost",
+    "port": "5432",
+    "user": "admin",
+    "password": "password123",
     "name": ""
   },
   "sheet": {
-    "spreadsheet_id": "1h38_D0rkkWDHD46yfeTAUtJS8YiLwFTIo4asRXM0GQU",
-    "credentials_json": "{\n  \"type\": \"service_account\",\n  \"project_id\": \"gen-lang-client-0326462549\",\n  \"private_key_id\": \"e785319de7267d085eff9af6f0b73a46484ff843\",\n  \"private_key\": \"-----BEGIN PRIVATE KEY-----\\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCii1IrY2sGSzvb\\n/NCk78EaRANMD+q152LVbNj4rc9Qu2oBnSnRxrNI6YThb5KZtaE020BJg06Qcfbq\\nNygTusgwUmwuLTwSs8Au97DeXsWtXu1FgTUAWK/2Fccnc93eDRtVgr7OEBERigxu\\nrm3XMgX6T1h/O36birISXXJ9jiHYjc1XV5TWo1SL1ikBkcaJeyolUqr1cz2tmLHP\\n1Z5x8JuzXnT5Jy0iKkl7qwHvUnYnmXk96ku2FLHfYpSvy/NGHO8gCUqvwyU8+BvC\\npoEoK1d7hag4D1qqTpSzuavLfMWBpXF5CbQGeYYFeMI7vE48+Hhm1evvbu536jf2\\nVFwTd9b3AgMBAAECggEASRXCyw6HM0vFrPsGZ3sEBQbawqsPel4BYvxvrJUeN+sk\\n1Xfws0mYGGsjW+f6b1GrG+SPid5YB3uurY5CX2inFY8h5DtjnPckrRmi9cGAOZ2K\\nqytXBQJbkBcntnYTJwIWrcK9f1LbEdtUDrowWke8R1nA7Wh3W4Gn4rkQvyKW1lLo\\ntX9Me/fDOrsz3RNrecYTVL4zQMOiPPBnJ+/2i/5MMZ0qqqjN4m4JSfzUKrPT5uQ6\\npr9LQ6fDj4hO84Y54rM13Ok8cWudc1wqkgISiPST0X2rmw4Z6rbUYQkUkh8lc+NJ\\nJRK+yXpAgWLK/CKEEBPj4QzYfMLUHYLU8AhIv3jEhQKBgQDMlZFJbDEtQZE0+OyY\\nq8M1Oe+MKj4BqY6yWhU1NpkWN7r4usF+Wua4gnj1vYxg5cs3RTShB1lT08IEPE72\\nitGtOOSHLRbqtWCz0pyI+Bo02pyApR48ppTLboUD60cB0HSNNVNzgjEW9SRAJVP5\\ns9u+BoAhUJTJ51Ha6mfUGrGmXQKBgQDLZQExIRy9gITuinOy58UFmMbxyLGitwFk\\nXfok7A1VIzjwXgHOWwSVh6KlPPe7PT5cfqnKb5lteM8YSD+yi4dwlrNT1K6/x4Ev\\nE4JIZkjtuIp8U+CSc2xwtNdEpjx3WaGugdrWIa3W2kPVY3u9pTHxgOuNH/arYATu\\nm4Fa2ux1YwKBgBbo7OMm/X7O597hvUT/fxW3zi6JEHaJMVShp9xUp+IIDaUK7N4k\\nec/RtI/4UP8M3Kvs0Q7zTrqHbSOiSUlslDxssZK9puJTu2eHv0XLWsvuazYwx2kN\\nUn5Rew3MTCBU4qhpf1XhD3Q9sXiJdZTx4jquaazRZEgT4mO8ejITZy91AoGBAK0a\\ntK38kXpTBFAEs72i9hLyWPd0qIJkoKGsPfXolNxN0ur4By96VWdx/aIGRo0r7YRJ\\nJPaujnUWKaNv8g5iJA5VpCAH1gZQpIjNYMd/jjgMJIj11h6ub69oqgG6PaISPcHI\\nsNgn580BDFRzi9/21Y/F+jOs7YIjgW8WGDycMD0jAoGAX71ZAXE0qyEMn8ni+yP2\\njD2Dr9tpOrjTsSi9te72IaRJWDQnGQS3rYs4EnaLzIbsW98Ti5Ad5v/bevci19zv\\nhNxD2B0XaaY99DDedVSqEFM5k3q2qKE/Rr5deb2Nsa8QppeziZHUWpKp5FnoMRq2\\nS7oxyx+HHlT6vHlHuoMUoYs=\\n-----END PRIVATE KEY-----\\n\",\n  \"client_email\": \"googlesheet-bot@gen-lang-client-0326462549.iam.gserviceaccount.com\",\n  \"client_id\": \"115947330350969276448\",\n  \"auth_uri\": \"https://accounts.google.com/o/oauth2/auth\",\n  \"token_uri\": \"https://oauth2.googleapis.com/token\",\n  \"auth_provider_x509_cert_url\": \"https://www.googleapis.com/oauth2/v1/certs\",\n  \"client_x509_cert_url\": \"https://www.googleapis.com/robot/v1/metadata/x509/googlesheet-bot%40gen-lang-client-0326462549.iam.gserviceaccount.com\",\n  \"universe_domain\": \"googleapis.com\"\n}\n"
-  }
+    "spreadsheet_id": "",
+    "credentials_json": ""
+  },
+  "app_port": "4500"
 }

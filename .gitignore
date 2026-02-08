@@ -3,6 +3,7 @@
 *.dll
 *.so
 *.dylib
+*.exe~
 
 # Local Database
 *.db
@@ -22,6 +23,9 @@ deploy/uploads/*
 # OS specific
 .DS_Store
 Thumbs.db
+
+# Node modules
+node_modules/
 
 # Config (Optional: Exclude if contains sensitive keys, but including for convenience as per user request context)
 # config.json 

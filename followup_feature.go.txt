@@ -1,0 +1,303 @@
+
+// 1. ADD THIS STRUCT (After User struct)
+type FollowupTask struct {
+	ID            int       `json:"id"`
+	UserID        int       `json:"user_id"`
+	JID           string    `json:"jid"`
+	ScheduledTime time.Time `json:"scheduled_time"`
+	Instruction   string    `json:"instruction"`
+	Status        string    `json:"status"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+// 2. ADD THIS IN initUserDB() function (After users table creation)
+_, err = authDB.Exec(`CREATE TABLE IF NOT EXISTS followup_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    jid TEXT,
+    scheduled_time DATETIME,
+    instruction TEXT,
+    status TEXT DEFAULT 'pending',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_id) REFERENCES users(id)
+)`)
+if err != nil {
+    log.Fatal("Failed to create followup_tasks table:", err)
+}
+
+// 3. ADD THIS IN main() function (Before Setup Fiber)
+// Start Follow-up Scheduler
+go processFollowups()
+
+// 4. ADD THESE ROUTES IN main() (Inside api group)
+api.Post("/followup", func(c *fiber.Ctx) error {
+    userID := c.Locals("userID").(int)
+    var req struct {
+        JID          string `json:"jid"`
+        DelayMinutes int    `json:"delay_minutes"`
+        Instruction  string `json:"instruction"`
+    }
+    if err := c.BodyParser(&req); err != nil {
+        return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid JSON"})
+    }
+
+    scheduledTime := time.Now().Add(time.Duration(req.DelayMinutes) * time.Minute)
+    
+    _, err := authDB.Exec("INSERT INTO followup_tasks (user_id, jid, scheduled_time, instruction, status) VALUES (?, ?, ?, ?, 'pending')",
+        userID, req.JID, scheduledTime, req.Instruction)
+    
+    if err != nil {
+        log.Println("Error creating followup:", err)
+        return c.Status(500).JSON(fiber.Map{"success": false, "message": "Database Error"})
+    }
+
+    return c.JSON(fiber.Map{"success": true, "message": "Follow-up scheduled"})
+})
+
+api.Get("/followup", func(c *fiber.Ctx) error {
+    userID := c.Locals("userID").(int)
+    rows, err := authDB.Query("SELECT id, jid, scheduled_time, instruction, status FROM followup_tasks WHERE user_id = ? AND status = 'pending' ORDER BY scheduled_time ASC", userID)
+    if err != nil {
+        return c.Status(500).JSON(fiber.Map{"error": "Database error"})
+    }
+    defer rows.Close()
+
+    var tasks []FollowupTask
+    for rows.Next() {
+        var t FollowupTask
+        if err := rows.Scan(&t.ID, &t.JID, &t.ScheduledTime, &t.Instruction, &t.Status); err == nil {
+            tasks = append(tasks, t)
+        }
+    }
+    return c.JSON(fiber.Map{"success": true, "tasks": tasks})
+})
+
+api.Delete("/followup/:id", func(c *fiber.Ctx) error {
+    userID := c.Locals("userID").(int)
+    id := c.Params("id")
+    
+    res, err := authDB.Exec("DELETE FROM followup_tasks WHERE id = ? AND user_id = ?", id, userID)
+    if err != nil {
+        return c.Status(500).JSON(fiber.Map{"error": "Database error"})
+    }
+    rows, _ := res.RowsAffected()
+    if rows == 0 {
+        return c.Status(404).JSON(fiber.Map{"error": "Task not found"})
+    }
+    return c.JSON(fiber.Map{"success": true})
+})
+
+// 5. ADD THESE FUNCTIONS AT THE END OF THE FILE
+
+func processFollowups() {
+	ticker := time.NewTicker(1 * time.Minute)
+	log.Println("Follow-up Scheduler Started")
+	for range ticker.C {
+		// Fetch pending tasks
+		rows, err := authDB.Query("SELECT id, user_id, jid, instruction FROM followup_tasks WHERE status = 'pending' AND scheduled_time <= ?", time.Now())
+		if err != nil {
+			log.Println("Scheduler Error:", err)
+			continue
+		}
+		
+		var tasks []FollowupTask
+		for rows.Next() {
+			var t FollowupTask
+			rows.Scan(&t.ID, &t.UserID, &t.JID, &t.Instruction)
+			tasks = append(tasks, t)
+		}
+		rows.Close()
+
+		for _, t := range tasks {
+			// Mark as processing
+			authDB.Exec("UPDATE followup_tasks SET status = 'processing' WHERE id = ?", t.ID)
+			
+			go func(task FollowupTask) {
+				// 1. Get Client (Find any connected client for this user)
+				var client *whatsmeow.Client
+				var deviceJIDStr string
+				
+				mu.Lock()
+				for dJID, ownerID := range deviceOwners {
+					if ownerID == task.UserID {
+						if c, ok := clients[dJID]; ok && c.IsConnected() {
+							client = c
+							deviceJIDStr = dJID
+							break
+						}
+					}
+				}
+				
+				// 2. Get User Config
+				userCfg := userConfigs[task.UserID]
+				// Fallback to global if user config missing (should not happen)
+				if userCfg == nil {
+					userCfg = &cfg
+				}
+				
+				// Get Chat History (Context)
+				history := chatHistories[task.JID]
+				mu.Unlock()
+
+				if client == nil {
+					log.Printf("Followup Task %d Failed: No connected client for user %d", task.ID, task.UserID)
+					authDB.Exec("UPDATE followup_tasks SET status = 'failed_no_client' WHERE id = ?", task.ID)
+					return
+				}
+				
+				contextText := ""
+				// Take last 10 messages
+				start := 0
+				if len(history) > 10 {
+					start = len(history) - 10
+				}
+				for _, msg := range history[start:] {
+					contextText += msg + "\n"
+				}
+
+				// 3. Generate Content
+				provName := userCfg.ActiveProvider
+				prov := userCfg.Providers[provName]
+				
+				systemPrompt := fmt.Sprintf("You are a helpful assistant. Context:\n%s\n\nTask: %s\n\nGenerate a single WhatsApp message based on the instruction. Do not include 'Subject:' or explanations. Just the message body.", contextText, task.Instruction)
+				
+				// Use helper function
+				reply, err := generateContent(provName, prov.APIKey, prov.Model, prov.BaseURL, systemPrompt, "")
+				
+				if err != nil {
+					log.Printf("Followup Task %d AI Error: %v", task.ID, err)
+					authDB.Exec("UPDATE followup_tasks SET status = 'failed_ai' WHERE id = ?", task.ID)
+					return
+				}
+
+				// 4. Send Message
+				targetJID, _ := types.ParseJID(task.JID)
+				
+				// Ensure we are sending from the correct device context if needed, 
+				// but whatsmeow client handles the sender key.
+				// However, if we are sending to "Note to Self" (User's own number), ensure JID is correct.
+				// But task.JID comes from incoming messages usually, so it should be correct.
+
+				resp := &waE2E.Message{Conversation: &reply}
+				
+				// Send using the found client
+				_, err = client.SendMessage(context.Background(), targetJID, resp)
+				if err != nil {
+					log.Printf("Followup Task %d Send Error: %v", task.ID, err)
+					authDB.Exec("UPDATE followup_tasks SET status = 'failed_send' WHERE id = ?", task.ID)
+					return
+				}
+
+				// Success
+				authDB.Exec("UPDATE followup_tasks SET status = 'sent' WHERE id = ?", task.ID)
+				log.Printf("Followup Task %d Sent to %s via %s", task.ID, task.JID, deviceJIDStr)
+				
+			}(t)
+		}
+	}
+}
+
+func generateContent(providerName, apiKey, modelName, baseURL, sysPrompt, userPrompt string) (string, error) {
+	if providerName == "gemini" {
+		if baseURL == "" {
+			baseURL = "https://generativelanguage.googleapis.com/v1beta"
+		}
+		if modelName == "gemini-pro" {
+			modelName = "gemini-1.5-flash"
+		}
+
+		url := fmt.Sprintf("%s/models/%s:generateContent?key=%s", baseURL, modelName, apiKey)
+		bodyData := map[string]interface{}{
+			"contents": []map[string]interface{}{
+				{"parts": []map[string]interface{}{{"text": sysPrompt + "\n" + userPrompt}}},
+			},
+		}
+		jsonBody, _ := json.Marshal(bodyData)
+
+		resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonBody))
+		if err != nil {
+			return "", err
+		}
+		defer resp.Body.Close()
+
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != 200 {
+			return "", fmt.Errorf("gemini error: %s", string(bodyBytes))
+		}
+
+		var result map[string]interface{}
+		if err := json.Unmarshal(bodyBytes, &result); err != nil {
+			return "", err
+		}
+
+		if candidates, ok := result["candidates"].([]interface{}); ok && len(candidates) > 0 {
+			if content, ok := candidates[0].(map[string]interface{})["content"].(map[string]interface{}); ok {
+				if parts, ok := content["parts"].([]interface{}); ok && len(parts) > 0 {
+					return parts[0].(map[string]interface{})["text"].(string), nil
+				}
+			}
+		}
+		return "", fmt.Errorf("unexpected gemini response structure")
+
+	} else {
+		// OpenAI Compatible
+		if baseURL == "" {
+			switch providerName {
+			case "openai":
+				baseURL = "https://api.openai.com/v1"
+			case "groq":
+				baseURL = "https://api.groq.com/openai/v1"
+			case "byteplus":
+				baseURL = "https://ark.ap-southeast.bytepluses.com/api/v3"
+			case "qwen":
+				baseURL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+			}
+		}
+		if baseURL == "" {
+			return "", fmt.Errorf("base url empty")
+		}
+
+		url := fmt.Sprintf("%s/chat/completions", strings.TrimRight(baseURL, "/"))
+		
+		messages := []map[string]interface{}{
+			{"role": "system", "content": sysPrompt},
+		}
+		if userPrompt != "" {
+			messages = append(messages, map[string]interface{}{"role": "user", "content": userPrompt})
+		}
+
+		bodyData := map[string]interface{}{
+			"model": modelName,
+			"messages": messages,
+		}
+		jsonBody, _ := json.Marshal(bodyData)
+
+		req, _ := http.NewRequest("POST", url, bytes.NewBuffer(jsonBody))
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		req.Header.Set("Content-Type", "application/json")
+
+		client := &http.Client{}
+		resp, err := client.Do(req)
+		if err != nil {
+			return "", err
+		}
+		defer resp.Body.Close()
+
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != 200 {
+			return "", fmt.Errorf("openai error: %s", string(bodyBytes))
+		}
+
+		var result map[string]interface{}
+		if err := json.Unmarshal(bodyBytes, &result); err != nil {
+			return "", err
+		}
+
+		if choices, ok := result["choices"].([]interface{}); ok && len(choices) > 0 {
+			if message, ok := choices[0].(map[string]interface{})["message"].(map[string]interface{}); ok {
+				return message["content"].(string), nil
+			}
+		}
+		return "", fmt.Errorf("unexpected openai response structure")
+	}
+}

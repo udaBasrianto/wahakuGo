@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/PuerkitoBio/goquery"
 	"database/sql"
 	_ "github.com/go-sql-driver/mysql"
+	_ "github.com/lib/pq" // PostgreSQL Driver
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/session"
@@ -26,11 +28,13 @@ import (
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store/sqlstore"
+	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	_ "modernc.org/sqlite"
 	"google.golang.org/protobuf/proto"
 
+	"golang.org/x/oauth2/google"
 	"google.golang.org/api/option"
 	"google.golang.org/api/sheets/v4"
 )
@@ -43,6 +47,7 @@ type ProviderConfig struct {
 }
 
 type DBConfig struct {
+	Type     string `json:"type"` // "mysql" or "postgres"
 	Host     string `json:"host"`
 	Port     string `json:"port"`
 	User     string `json:"user"`
@@ -84,7 +89,28 @@ var (
 	sheetsService *sheets.Service // Google Sheets Service
 	sheetSchema   string          // Sheet names & headers for AI
 	store         *session.Store  // Session Store
+	authDB        *sql.DB         // SQLite for Users
+	chatHistories = make(map[string][]string) // Chat History Memory
+	historyMutex  sync.Mutex      // Mutex for Chat History
 )
+
+type User struct {
+	ID       int    `json:"id"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+	IsAdmin  bool   `json:"is_admin"`
+	IsActive bool   `json:"is_active"`
+}
+
+type FollowupTask struct {
+	ID            int       `json:"id"`
+	UserID        int       `json:"user_id"`
+	JID           string    `json:"jid"`
+	ScheduledTime time.Time `json:"scheduled_time"`
+	Instruction   string    `json:"instruction"`
+	Status        string    `json:"status"`
+	CreatedAt     time.Time `json:"created_at"`
+}
 
 func main() {
 	// 1. Load Config
@@ -99,9 +125,49 @@ func main() {
 	// 2. Setup Database
 	dbLog := waLog.Stdout("Database", "ERROR", true)
 	var err error
-	container, err = sqlstore.New(context.Background(), "sqlite", "file:wahaku.db?_pragma=foreign_keys(1)&_busy_timeout=5000&_journal_mode=WAL", dbLog)
+
+	// Open Shared SQLite Connection to prevent locking issues
+	// We use the same connection for Whatsmeow and AuthDB
+	sharedDB, err := sql.Open("sqlite", "file:wahaku.db?_pragma=foreign_keys(1)&_busy_timeout=5000&_journal_mode=WAL")
 	if err != nil {
-		log.Fatal("Failed to connect to DB:", err)
+		log.Fatal("Failed to open Shared DB:", err)
+	}
+	sharedDB.SetMaxOpenConns(1) // Force single connection for SQLite to ensure safety
+
+	// Init Whatsmeow with shared DB
+	container = sqlstore.NewWithDB(sharedDB, "sqlite", dbLog)
+
+
+	// Init Auth DB (Shared)
+	authDB = sharedDB
+	
+	// Create Tables
+	_, err = authDB.Exec(`CREATE TABLE IF NOT EXISTS users (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		username TEXT UNIQUE,
+		password TEXT,
+		is_admin BOOLEAN DEFAULT 0,
+		is_active BOOLEAN DEFAULT 0
+	);
+	CREATE TABLE IF NOT EXISTS followup_tasks (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		user_id INTEGER,
+		jid TEXT,
+		scheduled_time DATETIME,
+		instruction TEXT,
+		status TEXT DEFAULT 'pending',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY(user_id) REFERENCES users(id)
+	);`)
+	if err != nil {
+		log.Fatal("Failed to create tables:", err)
+	}
+
+	// Create Admin if not exists
+	var count int
+	authDB.QueryRow("SELECT COUNT(*) FROM users WHERE username = ?", cfg.AdminUsername).Scan(&count)
+	if count == 0 {
+		authDB.Exec("INSERT INTO users (username, password, is_admin, is_active) VALUES (?, ?, 1, 1)", cfg.AdminUsername, cfg.AdminPassword)
 	}
 
 	deviceStore, err := container.GetFirstDevice(context.Background())
@@ -132,6 +198,9 @@ func main() {
 		}
 	}()
 
+	// Start Follow-up Scheduler
+	go processFollowups()
+
 	// 5. Setup Fiber
 	store = session.New(session.Config{
 		Expiration: 24 * time.Hour,
@@ -144,8 +213,14 @@ func main() {
 
 	// Middleware Auth
 	app.Use(func(c *fiber.Ctx) error {
+		// Whitelist Static Assets
+		path := c.Path()
+		if strings.HasSuffix(path, ".css") || strings.HasSuffix(path, ".js") || strings.HasSuffix(path, ".png") || strings.HasSuffix(path, ".jpg") || strings.HasSuffix(path, ".ico") || strings.HasSuffix(path, ".svg") {
+			return c.Next()
+		}
+
 		// Whitelist Routes
-		if c.Path() == "/login" || strings.HasPrefix(c.Path(), "/api/auth") {
+		if path == "/login" || path == "/register" || strings.HasPrefix(path, "/api/auth") {
 			return c.Next()
 		}
 
@@ -164,6 +239,14 @@ func main() {
 			return c.Redirect("/login")
 		}
 
+		// Set Locals
+		if uid := sess.Get("userID"); uid != nil {
+			c.Locals("userID", uid)
+		}
+		if isAdmin := sess.Get("isAdmin"); isAdmin != nil {
+			c.Locals("isAdmin", isAdmin)
+		}
+
 		return c.Next()
 	})
 
@@ -173,6 +256,12 @@ func main() {
 	// Serve Static Files
 	app.Get("/login", func(c *fiber.Ctx) error {
 		return c.SendFile("./views/login.html")
+	})
+	app.Get("/register", func(c *fiber.Ctx) error {
+		return c.SendFile("./views/register.html")
+	})
+	app.Get("/dashboard", func(c *fiber.Ctx) error {
+		return c.SendFile("./views/index.html")
 	})
 	app.Static("/", "./views")
 
@@ -190,55 +279,89 @@ func main() {
 			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid Request"})
 		}
 
-		if req.Username == cfg.AdminUsername && req.Password == cfg.AdminPassword {
-			sess, err := store.Get(c)
-			if err != nil {
-				return c.Status(500).JSON(fiber.Map{"success": false, "message": "Session Error"})
+		// Check DB
+		var user User
+		err := authDB.QueryRow("SELECT id, username, password, is_admin, is_active FROM users WHERE username = ?", req.Username).Scan(&user.ID, &user.Username, &user.Password, &user.IsAdmin, &user.IsActive)
+		if err == sql.ErrNoRows {
+			return c.Status(401).JSON(fiber.Map{"success": false, "message": "User tidak ditemukan"})
+		} else if err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Database Error"})
+		}
+
+		// Check Password (if set)
+		if req.Password != "" && user.Password != "" {
+			// If user is admin, allow password from Config as well (Master Password)
+			isConfigAdmin := user.Username == cfg.AdminUsername && req.Password == cfg.AdminPassword
+			
+			if req.Password != user.Password && !isConfigAdmin {
+				return c.Status(401).JSON(fiber.Map{"success": false, "message": "Password salah"})
 			}
+		}
 
-			// Check if WhatsApp is connected
-			if client != nil && client.IsConnected() && client.Store.ID != nil {
-				// Generate OTP
-				rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-				otp := fmt.Sprintf("%06d", rng.Intn(1000000))
-				
-				// Save OTP to session
-				sess.Set("otp", otp)
-				sess.Set("otp_expiry", time.Now().Add(5*time.Minute).Unix())
-				sess.Set("temp_auth", true) // Temporary flag
-				if err := sess.Save(); err != nil {
-					return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to save session"})
-				}
+		// Check Active
+		if !user.IsActive {
+			return c.JSON(fiber.Map{"success": true, "pending_approval": true, "message": "Akun Anda sedang menunggu persetujuan admin."})
+		}
 
-				// Send OTP via WhatsApp (Self Message)
-				targetJID := *client.Store.ID
-				msg := &waE2E.Message{
-					Conversation: proto.String("🔐 Kode Login Wahaku Dashboard: *" + otp + "*\n\nJangan berikan kode ini kepada siapapun."),
-				}
-				
-				resp, err := client.SendMessage(context.Background(), targetJID, msg)
-				if err != nil {
-					log.Println("Failed to send OTP:", err)
-					// Fallback to normal login if failed to send
-					sess.Set("authenticated", true)
-					sess.Save()
-					return c.JSON(fiber.Map{"success": true, "require_otp": false, "message": "Gagal kirim OTP, login langsung."})
-				}
-				
-				log.Printf("OTP Sent to %s: %s (ID: %s)", targetJID.User, otp, resp.ID)
-				return c.JSON(fiber.Map{"success": true, "require_otp": true, "message": "OTP dikirim ke WhatsApp"})
-			}
+		sess, err := store.Get(c)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Session Error"})
+		}
 
-			// If WA not connected, normal login
+		// SPECIAL CASE: Admin Login with Password (Skip OTP if Username is 'admin' or similar non-phone)
+		// Or if user provided correct password and is admin, we can allow bypass.
+		// For now, let's explicitly allow the Config Admin to bypass OTP if password matches.
+		if user.Username == cfg.AdminUsername && (req.Password == cfg.AdminPassword || user.Password == cfg.AdminPassword) {
 			sess.Set("authenticated", true)
+			sess.Set("userID", user.ID)
+			sess.Set("isAdmin", user.IsAdmin)
+			sess.Save()
+			return c.JSON(fiber.Map{"success": true, "require_otp": false})
+		}
+
+		// Check if WhatsApp is connected
+		if client != nil && client.IsConnected() {
+			// Generate OTP
+			rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+			otp := fmt.Sprintf("%06d", rng.Intn(1000000))
+			
+			// Save OTP to session
+			sess.Set("otp", otp)
+			sess.Set("otp_expiry", time.Now().Add(5*time.Minute).Unix())
+			sess.Set("temp_auth", true) // Temporary flag
+			sess.Set("pending_user_id", user.ID)
+			sess.Set("pending_is_admin", user.IsAdmin)
 			if err := sess.Save(); err != nil {
 				return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to save session"})
 			}
 
+			// Send OTP via WhatsApp
+			targetJID := types.NewJID(user.Username, types.DefaultUserServer)
+			
+			msg := &waE2E.Message{
+				Conversation: proto.String("🔐 Kode Login Wahaku Dashboard: *" + otp + "*\n\nJangan berikan kode ini kepada siapapun."),
+			}
+			
+			resp, err := client.SendMessage(context.Background(), targetJID, msg)
+			if err != nil {
+				log.Println("Failed to send OTP:", err)
+				return c.JSON(fiber.Map{"success": false, "message": "Gagal kirim OTP. Pastikan nomor benar dan bot terhubung."})
+			}
+			
+			log.Printf("OTP Sent to %s: %s (ID: %s)", targetJID.User, otp, resp.ID)
+			return c.JSON(fiber.Map{"success": true, "require_otp": true, "message": "OTP dikirim ke WhatsApp"})
+		}
+
+		// If WA not connected, allow admin bypass if credentials match config
+		if user.Username == cfg.AdminUsername && user.Password == cfg.AdminPassword {
+			sess.Set("authenticated", true)
+			sess.Set("userID", user.ID)
+			sess.Set("isAdmin", user.IsAdmin)
+			sess.Save()
 			return c.JSON(fiber.Map{"success": true, "require_otp": false})
 		}
 
-		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Username atau Password salah"})
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "WhatsApp belum terhubung, tidak bisa kirim OTP."})
 	})
 
 	auth.Post("/verify", func(c *fiber.Ctx) error {
@@ -273,15 +396,51 @@ func main() {
 
 		if req.OTP == storedOTP.(string) {
 			// Success
+			userID := sess.Get("pending_user_id").(int)
+			isAdmin := sess.Get("pending_is_admin").(bool)
+
+			// ACTIVATE USER AUTOMATICALLY ON OTP SUCCESS (To unblock user)
+			_, err := authDB.Exec("UPDATE users SET is_active = 1 WHERE id = ?", userID)
+			if err != nil {
+				log.Println("Failed to activate user:", err)
+			}
+
 			sess.Set("authenticated", true)
+			sess.Set("userID", userID)
+			sess.Set("isAdmin", isAdmin)
 			sess.Delete("otp")
 			sess.Delete("otp_expiry")
 			sess.Delete("temp_auth")
+			sess.Delete("pending_user_id")
+			sess.Delete("pending_is_admin")
 			sess.Save()
 			return c.JSON(fiber.Map{"success": true})
 		}
 
 		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Kode OTP salah"})
+	})
+
+	auth.Post("/register", func(c *fiber.Ctx) error {
+		var req struct {
+			Username string `json:"username"`
+			Password string `json:"password"`
+		}
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid Request"})
+		}
+		
+		// Basic validation
+		if len(req.Username) < 10 {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Nomor WhatsApp tidak valid"})
+		}
+		
+		// Insert
+		_, err := authDB.Exec("INSERT INTO users (username, password, is_admin, is_active) VALUES (?, ?, 0, 0)", req.Username, req.Password)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Nomor sudah terdaftar"})
+		}
+		
+		return c.JSON(fiber.Map{"success": true, "message": "Pendaftaran berhasil. Tunggu persetujuan admin."})
 	})
 
 	auth.Post("/logout", func(c *fiber.Ctx) error {
@@ -330,6 +489,64 @@ func main() {
 		return c.JSON(fiber.Map{"success": true})
 	})
 	
+	// Follow-up Routes
+	api.Post("/followup", func(c *fiber.Ctx) error {
+		userID := c.Locals("userID").(int)
+		var req struct {
+			JID          string `json:"jid"`
+			DelayMinutes int    `json:"delay_minutes"`
+			Instruction  string `json:"instruction"`
+		}
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid JSON"})
+		}
+
+		scheduledTime := time.Now().Add(time.Duration(req.DelayMinutes) * time.Minute)
+		
+		_, err := authDB.Exec("INSERT INTO followup_tasks (user_id, jid, scheduled_time, instruction, status) VALUES (?, ?, ?, ?, 'pending')",
+			userID, req.JID, scheduledTime, req.Instruction)
+		
+		if err != nil {
+			log.Println("Error creating followup:", err)
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Database Error"})
+		}
+
+		return c.JSON(fiber.Map{"success": true, "message": "Follow-up scheduled"})
+	})
+
+	api.Get("/followup", func(c *fiber.Ctx) error {
+		userID := c.Locals("userID").(int)
+		rows, err := authDB.Query("SELECT id, jid, scheduled_time, instruction, status FROM followup_tasks WHERE user_id = ? AND status = 'pending' ORDER BY scheduled_time ASC", userID)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": "Database error"})
+		}
+		defer rows.Close()
+
+		var tasks []FollowupTask
+		for rows.Next() {
+			var t FollowupTask
+			if err := rows.Scan(&t.ID, &t.JID, &t.ScheduledTime, &t.Instruction, &t.Status); err == nil {
+				tasks = append(tasks, t)
+			}
+		}
+		return c.JSON(fiber.Map{"success": true, "tasks": tasks})
+	})
+
+	api.Delete("/followup/:id", func(c *fiber.Ctx) error {
+		userID := c.Locals("userID").(int)
+		id := c.Params("id")
+		
+		res, err := authDB.Exec("DELETE FROM followup_tasks WHERE id = ? AND user_id = ?", id, userID)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": "Database error"})
+		}
+		rows, _ := res.RowsAffected()
+		if rows == 0 {
+			return c.Status(404).JSON(fiber.Map{"error": "Task not found"})
+		}
+		return c.JSON(fiber.Map{"success": true})
+	})
+
 	// Upload File Endpoint
 	api.Post("/upload", func(c *fiber.Ctx) error {
 		file, err := c.FormFile("file")
@@ -480,6 +697,252 @@ func main() {
 		return c.JSON(fiber.Map{"success": true, "message": "Koneksi Sheets Berhasil! Available Sheets:\n" + sheetSchema})
 	})
 
+	// --- NEW ROUTES FIX ---
+	
+	// User Info / Profile
+	api.Get("/me", func(c *fiber.Ctx) error {
+		userID := c.Locals("userID").(int)
+		isAdmin := c.Locals("isAdmin").(bool)
+		var username string
+		authDB.QueryRow("SELECT username FROM users WHERE id = ?", userID).Scan(&username)
+		
+		return c.JSON(fiber.Map{
+			"id": userID,
+			"username": username,
+			"is_admin": isAdmin,
+		})
+	})
+
+	api.Get("/profile", func(c *fiber.Ctx) error {
+		return c.Redirect("/api/me")
+	})
+
+	// Device List (Mock for Single User)
+	api.Get("/device/list", func(c *fiber.Ctx) error {
+		devices := []map[string]interface{}{}
+		
+		if client != nil {
+			jid := "Unknown"
+			if client.Store.ID != nil {
+				jid = client.Store.ID.User
+			}
+			
+			statusStr := "Disconnected"
+			if connected {
+				statusStr = "Connected"
+			}
+
+			devices = append(devices, map[string]interface{}{
+				"jid": jid,
+				"status": statusStr,
+				"platform": "whatsapp",
+			})
+		}
+		return c.JSON(fiber.Map{"success": true, "devices": devices})
+	})
+
+	// Chat Contacts
+	api.Get("/chat-contacts", func(c *fiber.Ctx) error {
+		historyMutex.Lock()
+		defer historyMutex.Unlock()
+		
+		contacts := []string{}
+		for jid := range chatHistories {
+			contacts = append(contacts, jid)
+		}
+		return c.JSON(fiber.Map{"success": true, "contacts": contacts})
+	})
+
+	// Test AI
+	api.Post("/test-ai", func(c *fiber.Ctx) error {
+		var req struct {
+			Prompt string `json:"prompt"`
+		}
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid JSON"})
+		}
+		
+		reply := callAI(req.Prompt)
+		return c.JSON(fiber.Map{"success": true, "reply": reply})
+	})
+
+	// Delete Connections
+	api.Post("/connections/sheet/delete", func(c *fiber.Ctx) error {
+		cfg.Sheet = SheetConfig{} // Clear config
+		saveConfig()
+		sheetsService = nil
+		sheetSchema = ""
+		return c.JSON(fiber.Map{"success": true, "message": "Google Sheets connection removed"})
+	})
+	
+	api.Post("/connections/mysql/delete", func(c *fiber.Ctx) error {
+		cfg.Database = DBConfig{Type: "postgres", Host: "localhost", Port: "5432"} // Reset to default
+		saveConfig()
+		appDB = nil
+		dbSchema = ""
+		return c.JSON(fiber.Map{"success": true, "message": "Database connection removed"})
+	})
+
+	// Send Message API (Broadcast)
+	api.Post("/send-message", func(c *fiber.Ctx) error {
+		var req struct {
+			Phone   string `json:"phone"`
+			Message string `json:"message"`
+		}
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid JSON"})
+		}
+
+		if req.Phone == "" || req.Message == "" {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Phone and Message required"})
+		}
+
+		// Normalize Phone to JID
+		jid := req.Phone
+		if !strings.Contains(jid, "@s.whatsapp.net") {
+			// Basic sanitization
+			jid = strings.ReplaceAll(jid, "+", "")
+			jid = strings.ReplaceAll(jid, "-", "")
+			jid = strings.ReplaceAll(jid, " ", "")
+			
+			if strings.HasPrefix(jid, "08") {
+				jid = "62" + jid[1:]
+			}
+			jid = jid + "@s.whatsapp.net"
+		}
+
+		// Parse JID
+		remoteJID, err := types.ParseJID(jid)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid Phone Number"})
+		}
+
+		if client == nil || !client.IsConnected() {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "WhatsApp Disconnected"})
+		}
+
+		// Send Message
+		_, err = client.SendMessage(context.Background(), remoteJID, &waE2E.Message{
+			Conversation: proto.String(req.Message),
+		})
+		
+		if err != nil {
+			log.Println("Send Message Error:", err)
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to send message: " + err.Error()})
+		}
+
+		return c.JSON(fiber.Map{"success": true})
+	})
+
+	// --- USER MANAGEMENT ROUTES ---
+	userGroup := api.Group("/users")
+	
+	// List Users
+	userGroup.Get("/", func(c *fiber.Ctx) error {
+		// Check Admin
+		if isAdmin, ok := c.Locals("isAdmin").(bool); !ok || !isAdmin {
+			return c.Status(403).JSON(fiber.Map{"error": "Requires Admin privileges"})
+		}
+
+		rows, err := authDB.Query("SELECT id, username, is_admin, is_active FROM users ORDER BY id DESC")
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": "Database error"})
+		}
+		defer rows.Close()
+
+		var users []User
+		for rows.Next() {
+			var u User
+			if err := rows.Scan(&u.ID, &u.Username, &u.IsAdmin, &u.IsActive); err == nil {
+				users = append(users, u)
+			}
+		}
+		return c.JSON(fiber.Map{"users": users})
+	})
+
+	// Add User
+	userGroup.Post("/", func(c *fiber.Ctx) error {
+		// Check Admin
+		if isAdmin, ok := c.Locals("isAdmin").(bool); !ok || !isAdmin {
+			return c.Status(403).JSON(fiber.Map{"error": "Requires Admin privileges"})
+		}
+
+		var req User
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "Invalid JSON"})
+		}
+		
+		if req.Username == "" || req.Password == "" {
+			 return c.Status(400).JSON(fiber.Map{"error": "Username and Password required"})
+		}
+
+		_, err := authDB.Exec("INSERT INTO users (username, password, is_admin, is_active) VALUES (?, ?, ?, ?)", 
+			req.Username, req.Password, req.IsAdmin, req.IsActive)
+		
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": "Username already exists or Database error"})
+		}
+
+		return c.JSON(fiber.Map{"success": true})
+	})
+
+	// Update User
+	userGroup.Put("/:id", func(c *fiber.Ctx) error {
+		// Check Admin
+		if isAdmin, ok := c.Locals("isAdmin").(bool); !ok || !isAdmin {
+			return c.Status(403).JSON(fiber.Map{"error": "Requires Admin privileges"})
+		}
+
+		id := c.Params("id")
+		var req struct {
+			Username string `json:"username"`
+			Password string `json:"password"` // Optional
+			IsAdmin  bool   `json:"is_admin"`
+			IsActive bool   `json:"is_active"`
+		}
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "Invalid JSON"})
+		}
+
+		if req.Password != "" {
+			_, err := authDB.Exec("UPDATE users SET username = ?, password = ?, is_admin = ?, is_active = ? WHERE id = ?", 
+				req.Username, req.Password, req.IsAdmin, req.IsActive, id)
+			if err != nil {
+				return c.Status(500).JSON(fiber.Map{"error": "Database error"})
+			}
+		} else {
+			 _, err := authDB.Exec("UPDATE users SET username = ?, is_admin = ?, is_active = ? WHERE id = ?", 
+				req.Username, req.IsAdmin, req.IsActive, id)
+			 if err != nil {
+				return c.Status(500).JSON(fiber.Map{"error": "Database error"})
+			}
+		}
+
+		return c.JSON(fiber.Map{"success": true})
+	})
+
+	// Delete User
+	userGroup.Delete("/:id", func(c *fiber.Ctx) error {
+		// Check Admin
+		if isAdmin, ok := c.Locals("isAdmin").(bool); !ok || !isAdmin {
+			return c.Status(403).JSON(fiber.Map{"error": "Requires Admin privileges"})
+		}
+		
+		id := c.Params("id")
+		// Prevent deleting self
+		myID := c.Locals("userID").(int)
+		idInt, _ := strconv.Atoi(id)
+		if idInt == myID {
+			 return c.Status(400).JSON(fiber.Map{"error": "Cannot delete yourself"})
+		}
+
+		_, err := authDB.Exec("DELETE FROM users WHERE id = ?", id)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": "Database error"})
+		}
+		return c.JSON(fiber.Map{"success": true})
+	})
+
 	api.Get("/models", fetchModelsHandler)
 
 	log.Println("Server running on http://localhost:" + cfg.AppPort)
@@ -517,8 +980,8 @@ func getQR() {
 func eventHandler(evt interface{}) {
 	switch v := evt.(type) {
 	case *events.Message:
-		// Ignore status updates or self messages
-		if v.Info.IsFromMe || v.Info.IsGroup || v.Info.Sender.User == "status" {
+		// Ignore status updates, self messages, groups, or broadcasts
+		if v.Info.IsFromMe || v.Info.IsGroup || v.Info.Sender.User == "status" || v.Info.Chat.User == "status" {
 			return
 		}
 
@@ -533,9 +996,26 @@ func eventHandler(evt interface{}) {
 
 		log.Println("Received:", msg, "From:", v.Info.Sender.User)
 
+		// Save to History
+		chatID := v.Info.Chat.String()
+		historyMutex.Lock()
+		chatHistories[chatID] = append(chatHistories[chatID], "User: "+msg)
+		if len(chatHistories[chatID]) > 20 {
+			chatHistories[chatID] = chatHistories[chatID][len(chatHistories[chatID])-20:]
+		}
+		historyMutex.Unlock()
+
 		// Call AI
 		go func() {
 			reply := callAI(msg)
+			// Save Reply to History
+			historyMutex.Lock()
+			chatHistories[chatID] = append(chatHistories[chatID], "Assistant: "+reply)
+			if len(chatHistories[chatID]) > 20 {
+				chatHistories[chatID] = chatHistories[chatID][len(chatHistories[chatID])-20:]
+			}
+			historyMutex.Unlock()
+
 			// Send Reply
 			client.SendMessage(context.Background(), v.Info.Chat, &waE2E.Message{
 				Conversation: &reply,
@@ -836,15 +1316,25 @@ func connectAppDB() {
 		return
 	}
 	
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s", 
-		cfg.Database.User, 
-		cfg.Database.Password, 
-		cfg.Database.Host, 
-		cfg.Database.Port, 
-		cfg.Database.Name)
+	var dsn string
+	var driver string
+
+	if cfg.Database.Type == "postgres" {
+		driver = "postgres"
+		dsn = fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+			cfg.Database.Host, cfg.Database.Port, cfg.Database.User, cfg.Database.Password, cfg.Database.Name)
+	} else {
+		driver = "mysql"
+		dsn = fmt.Sprintf("%s:%s@tcp(%s:%s)/%s", 
+			cfg.Database.User, 
+			cfg.Database.Password, 
+			cfg.Database.Host, 
+			cfg.Database.Port, 
+			cfg.Database.Name)
+	}
 	
 	var err error
-	appDB, err = sql.Open("mysql", dsn)
+	appDB, err = sql.Open(driver, dsn)
 	if err != nil {
 		log.Println("DB Connect Error:", err)
 		return
@@ -855,7 +1345,7 @@ func connectAppDB() {
 		return
 	}
 	
-	log.Println("Connected to Application Database:", cfg.Database.Name)
+	log.Println("Connected to Application Database:", cfg.Database.Name, "(", driver, ")")
 	refreshSchema()
 }
 
@@ -864,7 +1354,17 @@ func refreshSchema() {
 		return
 	}
 	
-	rows, err := appDB.Query("SELECT TABLE_NAME, COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ?", cfg.Database.Name)
+	var query string
+	var args []interface{}
+
+	if cfg.Database.Type == "postgres" {
+		query = "SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = 'public'"
+	} else {
+		query = "SELECT TABLE_NAME, COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ?"
+		args = append(args, cfg.Database.Name)
+	}
+	
+	rows, err := appDB.Query(query, args...)
 	if err != nil {
 		log.Println("Schema fetch error:", err)
 		return
@@ -1181,4 +1681,265 @@ func fetchModelsHandler(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{"models": models})
+}
+
+func processFollowups() {
+	ticker := time.NewTicker(1 * time.Minute)
+	log.Println("Follow-up Scheduler Started")
+	for range ticker.C {
+		// Fetch pending tasks
+		rows, err := authDB.Query("SELECT id, user_id, jid, instruction FROM followup_tasks WHERE status = 'pending' AND scheduled_time <= ?", time.Now())
+		if err != nil {
+			log.Println("Scheduler Error:", err)
+			continue
+		}
+		
+		var tasks []FollowupTask
+		for rows.Next() {
+			var t FollowupTask
+			rows.Scan(&t.ID, &t.UserID, &t.JID, &t.Instruction)
+			tasks = append(tasks, t)
+		}
+		rows.Close()
+
+		for _, t := range tasks {
+			// Mark as processing
+			authDB.Exec("UPDATE followup_tasks SET status = 'processing' WHERE id = ?", t.ID)
+			
+			go func(task FollowupTask) {
+				// 1. Check Client (Single User Mode)
+				if client == nil || !client.IsConnected() {
+					log.Printf("Followup Task %d Failed: Client not connected", task.ID)
+					authDB.Exec("UPDATE followup_tasks SET status = 'failed_no_client' WHERE id = ?", task.ID)
+					return
+				}
+				
+				// 2. Get Config (Global)
+				// Use global cfg
+				
+				// Get Chat History
+				historyMutex.Lock()
+				history := chatHistories[task.JID]
+				historyMutex.Unlock()
+
+				contextText := ""
+				// Take last 10 messages
+				start := 0
+				if len(history) > 10 {
+					start = len(history) - 10
+				}
+				for _, msg := range history[start:] {
+					contextText += msg + "\n"
+				}
+				
+				// 3. Generate Content
+				provName := cfg.ActiveProvider
+				prov := cfg.Providers[provName]
+				
+				systemPrompt := fmt.Sprintf("You are a helpful assistant. Context:\n%s\n\nTask: %s\n\nGenerate a single WhatsApp message based on the instruction. Do not include 'Subject:' or explanations. Just the message body.", contextText, task.Instruction)
+				
+				// Use helper function
+				reply, err := generateContent(provName, prov.APIKey, prov.Model, prov.BaseURL, systemPrompt, "")
+				
+				if err != nil {
+					log.Printf("Followup Task %d AI Error: %v", task.ID, err)
+					authDB.Exec("UPDATE followup_tasks SET status = 'failed_ai' WHERE id = ?", task.ID)
+					return
+				}
+
+				// 4. Send Message
+				targetJID, _ := types.ParseJID(task.JID)
+				
+				resp := &waE2E.Message{Conversation: &reply}
+				
+				// Send using the global client
+				_, err = client.SendMessage(context.Background(), targetJID, resp)
+				if err != nil {
+					log.Printf("Followup Task %d Send Error: %v", task.ID, err)
+					authDB.Exec("UPDATE followup_tasks SET status = 'failed_send' WHERE id = ?", task.ID)
+					return
+				}
+
+				// Success
+				authDB.Exec("UPDATE followup_tasks SET status = 'sent' WHERE id = ?", task.ID)
+				log.Printf("Followup Task %d Sent to %s", task.ID, task.JID)
+				
+			}(t)
+		}
+	}
+}
+
+func generateContent(providerName, apiKey, modelName, baseURL, sysPrompt, userPrompt string) (string, error) {
+	if providerName == "gemini" {
+		if baseURL == "" {
+			baseURL = "https://generativelanguage.googleapis.com/v1beta"
+		}
+		if modelName == "gemini-pro" {
+			modelName = "gemini-1.5-flash"
+		}
+
+		url := fmt.Sprintf("%s/models/%s:generateContent?key=%s", baseURL, modelName, apiKey)
+		bodyData := map[string]interface{}{
+			"contents": []map[string]interface{}{
+				{"parts": []map[string]interface{}{{"text": sysPrompt + "\n" + userPrompt}}},
+			},
+		}
+		jsonBody, _ := json.Marshal(bodyData)
+
+		resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonBody))
+		if err != nil {
+			return "", err
+		}
+		defer resp.Body.Close()
+
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != 200 {
+			return "", fmt.Errorf("gemini error: %s", string(bodyBytes))
+		}
+
+		var result map[string]interface{}
+		if err := json.Unmarshal(bodyBytes, &result); err != nil {
+			return "", err
+		}
+
+		if candidates, ok := result["candidates"].([]interface{}); ok && len(candidates) > 0 {
+			if content, ok := candidates[0].(map[string]interface{})["content"].(map[string]interface{}); ok {
+				if parts, ok := content["parts"].([]interface{}); ok && len(parts) > 0 {
+					return parts[0].(map[string]interface{})["text"].(string), nil
+				}
+			}
+		}
+		return "", fmt.Errorf("unexpected gemini response structure")
+
+	} else if providerName == "vertex" {
+		// Vertex AI (via Service Account)
+		if apiKey == "" {
+			return "", fmt.Errorf("service account json required")
+		}
+		
+		var credsMap map[string]interface{}
+		if err := json.Unmarshal([]byte(apiKey), &credsMap); err != nil {
+			return "", fmt.Errorf("invalid service account json")
+		}
+		projectID, _ := credsMap["project_id"].(string)
+		if projectID == "" {
+			return "", fmt.Errorf("project_id not found in json")
+		}
+
+		location := baseURL
+		if location == "" {
+			location = "us-central1"
+		}
+
+		ctx := context.Background()
+		creds, err := google.CredentialsFromJSON(ctx, []byte(apiKey), "https://www.googleapis.com/auth/cloud-platform")
+		if err != nil {
+			return "", fmt.Errorf("auth error: %v", err)
+		}
+		token, err := creds.TokenSource.Token()
+		if err != nil {
+			return "", fmt.Errorf("token error: %v", err)
+		}
+
+		url := fmt.Sprintf("https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/google/models/%s:generateContent", 
+			location, projectID, location, modelName)
+
+		bodyData := map[string]interface{}{
+			"contents": []map[string]interface{}{
+				{"parts": []map[string]interface{}{{"text": sysPrompt + "\n" + userPrompt}}},
+			},
+		}
+		jsonBody, _ := json.Marshal(bodyData)
+
+		req, _ := http.NewRequest("POST", url, bytes.NewBuffer(jsonBody))
+		req.Header.Set("Authorization", "Bearer "+token.AccessToken)
+		req.Header.Set("Content-Type", "application/json")
+
+		client := &http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			return "", err
+		}
+		defer resp.Body.Close()
+
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != 200 {
+			return "", fmt.Errorf("vertex error: %s", string(bodyBytes))
+		}
+
+		var result map[string]interface{}
+		if err := json.Unmarshal(bodyBytes, &result); err != nil {
+			return "", err
+		}
+
+		if candidates, ok := result["candidates"].([]interface{}); ok && len(candidates) > 0 {
+			if content, ok := candidates[0].(map[string]interface{})["content"].(map[string]interface{}); ok {
+				if parts, ok := content["parts"].([]interface{}); ok && len(parts) > 0 {
+					return parts[0].(map[string]interface{})["text"].(string), nil
+				}
+			}
+		}
+		return "", fmt.Errorf("unexpected vertex response")
+
+	} else {
+		// OpenAI Compatible
+		if baseURL == "" {
+			switch providerName {
+			case "openai":
+				baseURL = "https://api.openai.com/v1"
+			case "groq":
+				baseURL = "https://api.groq.com/openai/v1"
+			case "byteplus":
+				baseURL = "https://ark.ap-southeast.bytepluses.com/api/v3"
+			case "qwen":
+				baseURL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+			}
+		}
+		if baseURL == "" {
+			return "", fmt.Errorf("base url empty")
+		}
+
+		url := fmt.Sprintf("%s/chat/completions", strings.TrimRight(baseURL, "/"))
+		
+		messages := []map[string]interface{}{
+			{"role": "system", "content": sysPrompt},
+		}
+		if userPrompt != "" {
+			messages = append(messages, map[string]interface{}{"role": "user", "content": userPrompt})
+		}
+
+		bodyData := map[string]interface{}{
+			"model": modelName,
+			"messages": messages,
+		}
+		jsonBody, _ := json.Marshal(bodyData)
+
+		req, _ := http.NewRequest("POST", url, bytes.NewBuffer(jsonBody))
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		req.Header.Set("Content-Type", "application/json")
+
+		client := &http.Client{}
+		resp, err := client.Do(req)
+		if err != nil {
+			return "", err
+		}
+		defer resp.Body.Close()
+
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != 200 {
+			return "", fmt.Errorf("openai error: %s", string(bodyBytes))
+		}
+
+		var result map[string]interface{}
+		if err := json.Unmarshal(bodyBytes, &result); err != nil {
+			return "", err
+		}
+
+		if choices, ok := result["choices"].([]interface{}); ok && len(choices) > 0 {
+			if message, ok := choices[0].(map[string]interface{})["message"].(map[string]interface{}); ok {
+				return message["content"].(string), nil
+			}
+		}
+		return "", fmt.Errorf("unexpected openai response structure")
+	}
 }

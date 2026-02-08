@@ -217,16 +217,38 @@ const providersInfo = {
 };
 
 async function loadData() {
-    try {
-        const res = await fetch('/api/config');
-        currentConfig = await res.json();
-        renderUI();
-    } catch(e) {
-        console.error("Failed to load config", e);
+        try {
+            const res = await fetch('/api/config');
+            currentConfig = await res.json();
+            renderUI();
+        } catch(e) {
+            console.error("Failed to load config", e);
+        }
     }
-}
 
-function renderUI() {
+    async function logoutApp() {
+        Swal.fire({
+            title: 'Keluar Dashboard?',
+            text: "Anda harus login ulang untuk mengakses halaman ini.",
+            icon: 'warning',
+            showCancelButton: true,
+            confirmButtonColor: '#d33',
+            cancelButtonColor: '#3085d6',
+            confirmButtonText: 'Ya, Keluar',
+            cancelButtonText: 'Batal'
+        }).then(async (result) => {
+            if (result.isConfirmed) {
+                try {
+                    await fetch('/api/auth/logout', {method: 'POST'});
+                    window.location.href = '/login';
+                } catch (e) {
+                    window.location.href = '/login';
+                }
+            }
+        });
+    }
+
+    function renderUI() {
     document.getElementById('system_prompt').value = currentConfig.system_prompt;
     
     // Render URL List
@@ -674,6 +696,58 @@ async function controlServer(cmd) {
         }
     } catch (e) {
         Swal.fire('Error', 'Tidak bisa terhubung ke server.', 'error');
+    }
+}
+
+async function logoutAdmin() {
+    try {
+        const result = await Swal.fire({
+            title: 'Keluar?',
+            text: "Anda akan keluar dari dashboard admin.",
+            icon: 'question',
+            showCancelButton: true,
+            confirmButtonColor: '#d33',
+            cancelButtonColor: '#3085d6',
+            confirmButtonText: 'Ya, Keluar'
+        });
+
+        if (result.isConfirmed) {
+            const res = await fetch('/api/auth/logout', {method: 'POST'});
+            if (res.ok) {
+                window.location.href = '/login';
+            } else {
+                Swal.fire('Gagal', 'Gagal logout', 'error');
+            }
+        }
+    } catch(e) {
+        console.error(e);
+        Swal.fire('Error', 'Gagal logout', 'error');
+    }
+}
+
+async function logoutAdmin() {
+    try {
+        const result = await Swal.fire({
+            title: 'Keluar?',
+            text: "Anda akan keluar dari dashboard admin.",
+            icon: 'question',
+            showCancelButton: true,
+            confirmButtonColor: '#d33',
+            cancelButtonColor: '#3085d6',
+            confirmButtonText: 'Ya, Keluar'
+        });
+
+        if (result.isConfirmed) {
+            const res = await fetch('/api/auth/logout', {method: 'POST'});
+            if (res.ok) {
+                window.location.href = '/login';
+            } else {
+                Swal.fire('Gagal', 'Gagal logout', 'error');
+            }
+        }
+    } catch(e) {
+        console.error(e);
+        Swal.fire('Error', 'Gagal logout', 'error');
     }
 }
 
