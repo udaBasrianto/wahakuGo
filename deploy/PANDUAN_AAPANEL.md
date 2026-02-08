@@ -109,6 +109,13 @@ Sekarang Anda bisa mengakses dashboard Wahaku melalui domain Anda.
 ---
 
 ### Troubleshooting
+- **Git Error: detected dubious ownership**
+  Jika saat `git pull` muncul error ini, jalankan perintah berikut di terminal:
+  ```bash
+  git config --global --add safe.directory /www/wwwroot/wahaku
+  ```
+  *(Sesuaikan path folder jika berbeda)*
+
 - **Aplikasi tidak jalan?**
   Cek log di Supervisor. Kemungkinan masalah permission atau config error.
 - **Port 4500 sudah terpakai?**
