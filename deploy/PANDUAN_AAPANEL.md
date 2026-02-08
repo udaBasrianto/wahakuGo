@@ -4,7 +4,8 @@ Panduan ini akan membantu Anda mengupload dan menjalankan aplikasi Wahaku di VPS
 
 ## 1. Persiapan File
 Di dalam folder `deploy` repository ini, sudah tersedia file-file yang dibutuhkan:
-- `wahaku-linux`: File binary aplikasi (sudah dicompile untuk Linux).
+- `wahaku-linux`: Binary untuk VPS biasa (Intel/AMD x64).
+- `wahaku-linux-arm64`: Binary untuk VPS ARM (Oracle ARM, AWS Graviton, dll).
 - `wahaku.service`: File konfigurasi service untuk menjalankan aplikasi di background.
 - `config.json`: Template konfigurasi.
 - `views/`: Folder tampilan web.
@@ -15,7 +16,10 @@ Di dalam folder `deploy` repository ini, sudah tersedia file-file yang dibutuhka
 3. Masuk ke direktori `/www/wwwroot/`.
 4. Buat folder baru, misalnya `wahaku`.
 5. Upload file-file berikut dari komputer Anda ke folder `/www/wwwroot/wahaku/`:
-   - `deploy/wahaku-linux` (Rename menjadi `wahaku` setelah upload agar lebih singkat).
+   - **Pilih salah satu binary sesuai arsitektur VPS Anda**:
+     - Jika pakai Intel/AMD: Upload `wahaku-linux`.
+     - Jika pakai ARM (arch64): Upload `wahaku-linux-arm64`.
+   - **PENTING**: Rename file yang diupload tadi menjadi `wahaku` agar command-nya konsisten.
    - `config.json` (Edit isinya sesuai kebutuhan, terutama port dan API Key).
    - Folder `views` (Upload seluruh folder beserta isinya).
    - Folder `uploads` (Buat folder kosong ini jika belum ada).
