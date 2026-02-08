@@ -30,7 +30,7 @@ Jika repository Anda **Private**, Anda harus menambahkan SSH Key VPS ke GitHub.
 
 4. Masuk ke folder aplikasi:
    ```bash
-   cd wahaku/wa-server/go-app
+   cd wahaku
    ```
 5. **Jalankan Script Setup Otomatis**:
    Script ini akan otomatis memilih binary yang tepat (x64/ARM), mengatur permission, dan menyiapkan config.
