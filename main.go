@@ -128,7 +128,8 @@ func main() {
 
 	// Open Shared SQLite Connection to prevent locking issues
 	// We use the same connection for Whatsmeow and AuthDB
-	sharedDB, err := sql.Open("sqlite", "file:wahaku.db?_pragma=foreign_keys(1)&_busy_timeout=5000&_journal_mode=WAL")
+	// Removed WAL mode for better compatibility on some VPS
+	sharedDB, err := sql.Open("sqlite", "file:wahaku.db?_pragma=foreign_keys(1)&_busy_timeout=5000")
 	if err != nil {
 		log.Fatal("Failed to open Shared DB:", err)
 	}
@@ -136,6 +137,11 @@ func main() {
 
 	// Init Whatsmeow with shared DB
 	container = sqlstore.NewWithDB(sharedDB, "sqlite", dbLog)
+	
+	// Ensure tables are created (force migration if needed)
+	if err := container.Upgrade(context.Background()); err != nil {
+		log.Println("Whatsmeow Store Upgrade Warning:", err)
+	}
 
 
 	// Init Auth DB (Shared)
