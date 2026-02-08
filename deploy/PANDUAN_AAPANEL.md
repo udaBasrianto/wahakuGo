@@ -96,19 +96,22 @@ Jika Anda ingin mengakses dashboard via domain (misal: `bot.domainanda.com`) tan
 3. Masuk ke menu **Reverse Proxy**.
 4. Klik **Add Reverse Proxy**.
    - **Name**: `wahaku-app`
-   - **Target URL**: `http://127.0.0.1:4500` (Sesuaikan port dengan `config.json`).
+   - **Target URL**: `http://127.0.0.1:3000` (Sesuaikan port dengan `config.json`).
    - **Sent Domain**: `$host`
 5. Klik **Submit**.
 
 ## 6. Selesai!
 Sekarang Anda bisa mengakses dashboard Wahaku melalui domain Anda.
 - Buka `http://bot.domainanda.com`
-- Login dengan username/password yang ada di `config.json` (Default: `admin` / `password`).
+- Login dengan username/password yang ada di `config.json` (Default: `admin` / `password123`).
 - Scan QR Code WhatsApp dan mulai gunakan botnya.
 
 ---
 
 ### Troubleshooting
+- **Nginx Error: missing well-known config**
+  Jika saat save Reverse Proxy muncul error Nginx, edit file config Nginx domain tersebut, dan beri tanda pagar (`#`) pada baris:
+  `# include .../well-known/...`
 - **Git Error: Permission denied (.git/FETCH_HEAD)**
   Masalah ini terjadi karena folder dibuat oleh user lain (misal root/www), tapi Anda login sebagai user biasa (misal opc).
   Perbaiki permission dengan perintah:
