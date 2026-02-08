@@ -804,8 +804,10 @@ func main() {
     api.Post("/device/delete", func(c *fiber.Ctx) error {
         // Reuse logout logic
         if client != nil {
-            client.Disconnect()
-            client.Logout(context.Background())
+            if client.IsConnected() {
+				client.Logout(context.Background())
+			}
+			client.Disconnect()
             if client.Store != nil {
                  client.Store.Delete(context.Background())
             }
