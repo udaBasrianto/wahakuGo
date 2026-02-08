@@ -1,0 +1,18 @@
+[Unit]
+Description=Wahaku WhatsApp AI Assistant
+After=network.target
+
+[Service]
+# Ganti /www/wwwroot/wahaku dengan path direktori project Anda di VPS
+WorkingDirectory=/www/wwwroot/wahaku
+# Pastikan file binary memiliki permission execute (chmod +x)
+ExecStart=/www/wwwroot/wahaku/wahaku-linux
+Restart=always
+RestartSec=10
+# User yang menjalankan service (biasanya root atau www)
+User=root
+# Environment variables jika diperlukan
+# Environment=PORT=4500
+
+[Install]
+WantedBy=multi-user.target
