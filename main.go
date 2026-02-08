@@ -141,6 +141,27 @@ func main() {
 	// Ensure tables are created (force migration if needed)
 	if err := container.Upgrade(context.Background()); err != nil {
 		log.Println("Whatsmeow Store Upgrade Warning:", err)
+		
+		// Fallback: Create table manually if Upgrade failed (Common issue on some SQLite versions)
+		_, execErr := sharedDB.Exec(`CREATE TABLE IF NOT EXISTS whatsmeow_device (
+			jid TEXT PRIMARY KEY,
+			registration_id INTEGER,
+			noise_key BLOB,
+			identity_key BLOB,
+			signed_pre_key BLOB,
+			signed_pre_key_id INTEGER,
+			signed_pre_key_sig BLOB,
+			adv_secret_key BLOB,
+			created_at DATETIME,
+			os TEXT,
+			platform TEXT,
+			require_full_sync BOOLEAN
+		);`)
+		if execErr != nil {
+			log.Println("Manual Table Creation Failed:", execErr)
+		} else {
+			log.Println("Manual Table Creation Success (Fallback)")
+		}
 	}
 
 
@@ -738,14 +759,76 @@ func main() {
 				statusStr = "Connected"
 			}
 
+			// Only show if actually initialized/connected or has JID
+			// For single user mode, we always show one entry if configured
 			devices = append(devices, map[string]interface{}{
 				"jid": jid,
 				"status": statusStr,
 				"platform": "whatsapp",
+				"user": "Main Device", 
 			})
 		}
 		return c.JSON(fiber.Map{"success": true, "devices": devices})
 	})
+
+	// Device Add (Start QR)
+	api.Post("/device/add", func(c *fiber.Ctx) error {
+		mu.Lock()
+		defer mu.Unlock()
+		
+		if connected {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Device already connected"})
+		}
+		
+		// Trigger QR generation if not already running
+		if status == "DISCONNECTED" || status == "STARTING" {
+             go getQR()
+		}
+		
+		return c.JSON(fiber.Map{"success": true})
+	})
+
+	// Device QR (Poll)
+	api.Get("/device/qr", func(c *fiber.Ctx) error {
+		mu.Lock()
+		defer mu.Unlock()
+		
+		if connected {
+			return c.JSON(fiber.Map{"success": false, "message": "Device connected"})
+		}
+
+		return c.JSON(fiber.Map{"success": true, "qr": qrCode})
+	})
+
+    // Device Delete (Logout)
+    api.Post("/device/delete", func(c *fiber.Ctx) error {
+        // Reuse logout logic
+        if client != nil {
+            client.Disconnect()
+            client.Logout(context.Background())
+            if client.Store != nil {
+                 client.Store.Delete(context.Background())
+            }
+        }
+        
+        // Re-init client
+        deviceStore, err := container.GetFirstDevice(context.Background())
+        if err != nil {
+            return c.Status(500).JSON(fiber.Map{"error": "Failed to reset device store"})
+        }
+        client = whatsmeow.NewClient(deviceStore, waLog.Stdout("Client", "INFO", true))
+        client.AddEventHandler(eventHandler)
+
+        mu.Lock()
+        status = "QR_READY"
+        connected = false
+        qrCode = ""
+        mu.Unlock()
+        
+        go getQR() // Start QR flow again immediately
+        
+        return c.JSON(fiber.Map{"success": true})
+    })
 
 	// Chat Contacts
 	api.Get("/chat-contacts", func(c *fiber.Ctx) error {
@@ -1319,6 +1402,7 @@ func callAILoop(prompt string, depth int) string {
 
 func connectAppDB() {
 	if cfg.Database.Host == "" || cfg.Database.User == "" {
+		// log.Println("Database config empty, skipping connection.")
 		return
 	}
 	

@@ -127,6 +127,18 @@ Sekarang Anda bisa mengakses dashboard Wahaku melalui domain Anda.
   ```
   *(Sesuaikan path folder jika berbeda)*
 
+- **Service Tidak Jalan / Error 502?**
+  Ini berarti aplikasi mati atau restart terus menerus.
+  1. Cek log di Supervisor (klik tombol **Log** di baris service `wahaku`).
+  2. Jika errornya "no such table: whatsmeow_device" atau "DB Ping Error":
+     - Jalankan `git pull` di terminal untuk update kode terbaru.
+     - **PENTING**: Jalankan ulang setup untuk update binary:
+       ```bash
+       bash deploy/setup.sh
+       ```
+     - Restart service di Supervisor.
+  3. Cek apakah port di Reverse Proxy sudah sesuai dengan `config.json` (Default 3000, atau 4500).
+
 - **Aplikasi tidak jalan?**
   Cek log di Supervisor. Kemungkinan masalah permission atau config error.
 - **Port 4500 sudah terpakai?**
