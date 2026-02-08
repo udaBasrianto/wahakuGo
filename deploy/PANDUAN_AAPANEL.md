@@ -77,9 +77,10 @@ Cara paling mudah menjalankan aplikasi Go di aaPanel adalah menggunakan **Superv
 ## 5. Setting Reverse Proxy (Agar bisa diakses via Domain)
 Jika Anda ingin mengakses dashboard via domain (misal: `bot.domainanda.com`) tanpa mengetik port:
 
-1. Di aaPanel, menu **Website** -> **Add Site**.
+1. Di aaPanel, menu **Website** -> **Add Site** (tab **PHP Project**).
    - **Domain**: `bot.domainanda.com`
-   - **PHP Version**: `Static` (atau Pure Static).
+   - **PHP Version**: Pilih **Static** (Paling bawah/atas biasanya).
+   - *Jangan pilih Node atau PHP versi lain, karena kita hanya butuh Nginx-nya saja.*
 2. Setelah website dibuat, klik nama websitenya untuk membuka pengaturan.
 3. Masuk ke menu **Reverse Proxy**.
 4. Klik **Add Reverse Proxy**.
