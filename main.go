@@ -1034,6 +1034,18 @@ func main() {
 
 	api.Get("/models", fetchModelsHandler)
 
+	// Version Info
+	api.Get("/version", func(c *fiber.Ctx) error {
+		return c.JSON(fiber.Map{
+			"success": true, 
+			"version": "1.1.0",
+			"build_time": "2026-02-09", 
+			"features": []string{"device-add", "otp-login", "admin-bypass"},
+		})
+	})
+
+	log.Println("Wahaku Service Starting...")
+	log.Println("Version: 1.1.0 (Build 2026-02-09)")
 	log.Println("Server running on http://localhost:" + cfg.AppPort)
 	log.Fatal(app.Listen(":" + cfg.AppPort))
 }
