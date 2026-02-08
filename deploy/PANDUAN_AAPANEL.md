@@ -3,14 +3,34 @@
 Panduan ini akan membantu Anda mengupload dan menjalankan aplikasi Wahaku di VPS yang menggunakan panel manajemen **aaPanel**.
 
 ## 1. Persiapan File
-Di dalam folder `deploy` repository ini, sudah tersedia file-file yang dibutuhkan:
-- `wahaku-linux`: Binary untuk VPS biasa (Intel/AMD x64).
-- `wahaku-linux-arm64`: Binary untuk VPS ARM (Oracle ARM, AWS Graviton, dll).
-- `wahaku.service`: File konfigurasi service untuk menjalankan aplikasi di background.
-- `config.json`: Template konfigurasi.
-- `views/`: Folder tampilan web.
+Anda bisa memilih dua metode: **Upload Manual** atau **Via Git (Recommended)**.
 
-## 2. Upload File ke VPS
+### Metode A: Via Git (Paling Mudah & Cepat)
+Gunakan metode ini jika VPS Anda memiliki akses internet.
+
+1. **Buka Terminal aaPanel** (atau SSH ke server).
+2. Masuk ke folder root web:
+   ```bash
+   cd /www/wwwroot/
+   ```
+3. Clone repository (Ganti URL dengan repo Anda):
+   ```bash
+   git clone https://github.com/udaBasrianto/wahakuGo.git wahaku
+   ```
+4. Masuk ke folder aplikasi:
+   ```bash
+   cd wahaku/wa-server/go-app
+   ```
+5. **Jalankan Script Setup Otomatis**:
+   Script ini akan otomatis memilih binary yang tepat (x64/ARM), mengatur permission, dan menyiapkan config.
+   ```bash
+   bash deploy/setup.sh
+   ```
+6. **Edit Config** (Jika perlu):
+   Buka file `config.json` di File Manager aaPanel dan sesuaikan isinya.
+
+### Metode B: Upload Manual
+Di dalam folder `deploy` repository ini...
 1. Login ke **aaPanel**.
 2. Buka menu **Files**.
 3. Masuk ke direktori `/www/wwwroot/`.
