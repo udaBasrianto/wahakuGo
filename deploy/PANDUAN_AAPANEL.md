@@ -109,6 +109,14 @@ Sekarang Anda bisa mengakses dashboard Wahaku melalui domain Anda.
 ---
 
 ### Troubleshooting
+- **Git Error: Permission denied (.git/FETCH_HEAD)**
+  Masalah ini terjadi karena folder dibuat oleh user lain (misal root/www), tapi Anda login sebagai user biasa (misal opc).
+  Perbaiki permission dengan perintah:
+  ```bash
+  sudo chown -R $USER:$USER /www/wwwroot/chat.yaakhi.id
+  ```
+  *(Ganti path sesuai lokasi project Anda)*
+
 - **Git Error: detected dubious ownership**
   Jika saat `git pull` muncul error ini, jalankan perintah berikut di terminal:
   ```bash
