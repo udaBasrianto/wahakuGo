@@ -365,6 +365,19 @@ func main() {
 			// Send OTP via WhatsApp
 			targetJID := types.NewJID(user.Username, types.DefaultUserServer)
 			
+			// Fix: Ensure device JID is set in store before sending (Note to Self check)
+			if client.Store.ID == nil {
+				// Fallback: If not logged in yet or no device, we cannot send
+				return c.JSON(fiber.Map{"success": false, "message": "Gagal kirim OTP: Bot belum terhubung (No Device ID)."})
+			}
+
+			// Fix for "Note to Self" (sending to own number)
+			// If target is same as bot, use user JID (Device=0)
+			if targetJID.User == client.Store.ID.User {
+				targetJID = *client.Store.ID
+				targetJID.Device = 0
+			}
+
 			msg := &waE2E.Message{
 				Conversation: proto.String("🔐 Kode Login Wahaku Dashboard: *" + otp + "*\n\nJangan berikan kode ini kepada siapapun."),
 			}
@@ -1146,7 +1159,22 @@ func eventHandler(evt interface{}) {
 }
 
 func callAI(prompt string) string {
+	// Security: Input Validation & Sanitization
+	// 1. Max Length to prevent Resource Exhaustion (Token Limit)
+	const MaxInputLength = 4000
+	if len(prompt) > MaxInputLength {
+		prompt = prompt[:MaxInputLength] + "... (truncated)"
+	}
+
+	// 2. Basic Sanitization (Remove Null Bytes & Control Characters that might confuse logs/parsers)
+	prompt = strings.ReplaceAll(prompt, "\x00", "")
+	
 	return callAILoop(prompt, 0)
+}
+
+// Global HTTP Client with Timeout to prevent hanging connections
+var aiHttpClient = &http.Client{
+	Timeout: 60 * time.Second,
 }
 
 func callAILoop(prompt string, depth int) string {
@@ -1202,7 +1230,9 @@ func callAILoop(prompt string, depth int) string {
 		}
 		jsonBody, _ := json.Marshal(bodyData)
 		
-		resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonBody))
+		req, _ := http.NewRequest("POST", url, bytes.NewBuffer(jsonBody))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := aiHttpClient.Do(req)
 		if err != nil {
 			return "Error connecting to AI: " + err.Error()
 		}
@@ -1267,8 +1297,7 @@ func callAILoop(prompt string, depth int) string {
 		req.Header.Set("Authorization", "Bearer "+provider.APIKey)
 		req.Header.Set("Content-Type", "application/json")
 		
-		client := &http.Client{}
-		resp, err := client.Do(req)
+		resp, err := aiHttpClient.Do(req)
 		if err != nil {
 			return "Error connecting to AI: " + err.Error()
 		}
