@@ -969,8 +969,11 @@ func main() {
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": "WhatsApp Disconnected"})
 		}
 
-		// Send Message
-		_, err = client.SendMessage(context.Background(), remoteJID, &waE2E.Message{
+		// Send Message with Timeout
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		_, err = client.SendMessage(ctx, remoteJID, &waE2E.Message{
 			Conversation: proto.String(req.Message),
 		})
 		
@@ -1176,8 +1179,11 @@ func eventHandler(evt interface{}) {
 			}
 			historyMutex.Unlock()
 
-			// Send Reply
-			client.SendMessage(context.Background(), v.Info.Chat, &waE2E.Message{
+			// Send Reply with Timeout
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			
+			client.SendMessage(ctx, v.Info.Chat, &waE2E.Message{
 				Conversation: &reply,
 			})
 		}()
@@ -1929,8 +1935,11 @@ func processFollowups() {
 				
 				resp := &waE2E.Message{Conversation: &reply}
 				
-				// Send using the global client
-				_, err = client.SendMessage(context.Background(), targetJID, resp)
+				// Send using the global client with Timeout
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				
+				_, err = client.SendMessage(ctx, targetJID, resp)
 				if err != nil {
 					log.Printf("Followup Task %d Send Error: %v", task.ID, err)
 					authDB.Exec("UPDATE followup_tasks SET status = 'failed_send' WHERE id = ?", task.ID)
