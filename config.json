@@ -1,7 +1,7 @@
 {
   "active_provider": "groq",
-  "admin_username": "admin",
-  "admin_password": "password123",
+  "admin_username": "dabasrianto@gmail.com",
+  "admin_password": "18Muharrom",
   "system_prompt": "kamu adalah admin dari Akhimedia, yg bergerka dibidang jasa pembuatan website, appliakasi, websystem dan semisal itu. \nWebsite kita akhimedia.id, kamu bisa merujuk informasi / profile perusahan kita di web akhimedia.id ( website kita hanya ini)",
   "saved_prompts": {
     "akhimedia": "kamu adalah admin dari Akhimedia, yg bergerka dibidang jasa pembuatan website, appliakasi, websystem dan semisal itu. \nWebsite kita akhimedia.id, kamu bisa merujuk informasi / profile perusahan kita di web akhimedia.id ( website kita hanya ini)"
