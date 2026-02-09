@@ -757,6 +757,46 @@ func main() {
 		return c.Redirect("/api/me")
 	})
 
+	// Update Profile (Self)
+	api.Post("/profile", func(c *fiber.Ctx) error {
+		userID := c.Locals("userID").(int)
+		
+		var req struct {
+			Username string `json:"username"`
+			Password string `json:"password"` // Optional
+		}
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "Invalid JSON"})
+		}
+
+		if req.Username == "" {
+			 return c.Status(400).JSON(fiber.Map{"error": "Username cannot be empty"})
+		}
+
+		// Check if username taken by others
+		var count int
+		authDB.QueryRow("SELECT COUNT(*) FROM users WHERE username = ? AND id != ?", req.Username, userID).Scan(&count)
+		if count > 0 {
+			return c.Status(400).JSON(fiber.Map{"error": "Username already taken"})
+		}
+
+		if req.Password != "" {
+			_, err := authDB.Exec("UPDATE users SET username = ?, password = ? WHERE id = ?", 
+				req.Username, req.Password, userID)
+			if err != nil {
+				return c.Status(500).JSON(fiber.Map{"error": "Database error"})
+			}
+		} else {
+			 _, err := authDB.Exec("UPDATE users SET username = ? WHERE id = ?", 
+				req.Username, userID)
+			 if err != nil {
+				return c.Status(500).JSON(fiber.Map{"error": "Database error"})
+			}
+		}
+
+		return c.JSON(fiber.Map{"success": true})
+	})
+
 	// Device List (Mock for Single User)
 	api.Get("/device/list", func(c *fiber.Ctx) error {
 		devices := []map[string]interface{}{}
