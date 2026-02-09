@@ -382,10 +382,14 @@ func main() {
 				Conversation: proto.String("🔐 Kode Login Wahaku Dashboard: *" + otp + "*\n\nJangan berikan kode ini kepada siapapun."),
 			}
 			
-			resp, err := client.SendMessage(context.Background(), targetJID, msg)
+			// Use context with timeout to prevent 504 Gateway Timeout if WA is stuck
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			resp, err := client.SendMessage(ctx, targetJID, msg)
 			if err != nil {
-				log.Println("Failed to send OTP:", err)
-				return c.JSON(fiber.Map{"success": false, "message": "Gagal kirim OTP. Pastikan nomor benar dan bot terhubung."})
+				log.Println("Failed to send OTP (Timeout/Error):", err)
+				return c.JSON(fiber.Map{"success": false, "message": "Gagal kirim OTP (Timeout). Pastikan bot terhubung."})
 			}
 			
 			log.Printf("OTP Sent to %s: %s (ID: %s)", targetJID.User, otp, resp.ID)
