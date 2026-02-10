@@ -705,7 +705,8 @@
             'openai': {icon: 'fa-bolt', name: 'OpenAI (GPT)', color: 'text-green-500'},
             'groq':   {icon: 'fa-microchip', name: 'Groq (Fast)', color: 'text-orange-500'},
             'qwen':   {icon: 'fa-cloud', name: 'Qwen (Alibaba)', color: 'text-purple-500'},
-            'byteplus': {icon: 'fa-music', name: 'BytePlus (Doubao)', color: 'text-pink-500'}
+            'byteplus': {icon: 'fa-music', name: 'BytePlus (Doubao)', color: 'text-pink-500'},
+            'deepseek': {icon: 'fa-brain', name: 'DeepSeek', color: 'text-blue-400'}
         };
         const providerModels = {
             'gemini': ['gemini-3.0-pro', 'gemini-3.0-flash', 'gemini-2.0-flash-exp', 'gemini-1.5-pro', 'gemini-1.5-flash'],
@@ -713,7 +714,8 @@
             'openai': ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-3.5-turbo'],
             'groq':   ['llama3-70b-8192', 'llama3-8b-8192', 'mixtral-8x7b-32768', 'gemma-7b-it'],
             'qwen':   ['qwen-turbo', 'qwen-plus', 'qwen-max'],
-            'byteplus': ['doubao-pro-32k', 'doubao-lite-32k', 'doubao-pro-4k', 'doubao-lite-4k']
+            'byteplus': ['doubao-pro-32k', 'doubao-lite-32k', 'doubao-pro-4k', 'doubao-lite-4k'],
+            'deepseek': ['deepseek-chat', 'deepseek-coder']
         };
 
         // Navigation
@@ -1119,7 +1121,7 @@
                         baseURLLabel = "Location (Region)";
                         baseURLPlaceholder = "us-central1";
                         showUpload = true;
-                    } else if (['openai', 'qwen', 'byteplus'].includes(key)) {
+                    } else if (['openai', 'qwen', 'byteplus', 'deepseek'].includes(key)) {
                          showBaseURL = true;
                     }
 
@@ -1516,21 +1518,36 @@
                         countEl.innerText = data.devices.length;
                         data.devices.forEach(d => {
                             const isConnected = d.status === 'CONNECTED';
+                            const isPrimary = d.is_primary;
                             const item = document.createElement('div');
                             item.className = 'flex justify-between items-center bg-white p-4 rounded-xl border border-gray-100 shadow-sm transition hover:shadow-md';
+                            // Format JID for display (remove @s.whatsapp.net)
+                            const displayJid = d.jid ? d.jid.replace('@s.whatsapp.net', '') : 'Connecting...';
+                            const displayName = d.alias || displayJid;
+
+                            let primaryBtn = '';
+                            if (isConnected && d.jid !== 'NEW') {
+                                if (isPrimary) {
+                                    primaryBtn = `<span class="text-xs font-bold px-3 py-1 rounded-full bg-blue-100 text-blue-700 mr-2" title="Perangkat Utama untuk OTP"><i class="fas fa-star"></i> Utama</span>`;
+                                } else {
+                                    primaryBtn = `<button onclick="setPrimaryDevice('${d.jid}')" class="text-gray-400 hover:text-blue-500 transition p-2 mr-1" title="Jadikan Utama"><i class="far fa-star"></i></button>`;
+                                }
+                            }
+
                             item.innerHTML = `
                                 <div class="flex items-center gap-4">
                                     <div class="${isConnected ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'} w-10 h-10 rounded-full flex items-center justify-center text-xl">
                                         <i class="fas ${isConnected ? 'fa-check-circle' : 'fa-exclamation-circle'}"></i>
                                     </div>
                                     <div>
-                                        <div class="font-bold text-gray-800">${d.user || 'Unknown User'}</div>
-                                        <div class="text-xs text-gray-500 font-mono">${d.jid}</div>
+                                        <div class="font-bold text-gray-800">${displayName}</div>
+                                        <div class="text-xs text-gray-500 font-mono">${displayJid}</div>
                                     </div>
                                 </div>
                                 <div class="flex items-center gap-3">
+                                    ${primaryBtn}
                                     <span class="text-xs font-bold px-3 py-1 rounded-full ${isConnected ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}">${d.status}</span>
-                                    <button onclick="deleteDevice('${d.jid}')" class="text-gray-400 hover:text-red-500 transition p-2"><i class="fas fa-trash-alt"></i></button>
+                                    <button onclick="deleteDevice('${d.jid}')" class="text-gray-400 hover:text-red-500 transition p-2" title="Hapus Device"><i class="fas fa-trash-alt"></i></button>
                                 </div>
                             `;
                             list.appendChild(item);
@@ -1545,49 +1562,120 @@
 
         async function addDevice() {
             document.getElementById('qr-area').classList.remove('hidden');
+            // Clear previous QR
+            document.getElementById('qrcode').innerHTML = '<div class="text-center text-gray-400 text-sm">Requesting QR...</div>';
+            
             try {
                 const res = await fetchAuth('/api/device/add', {method: 'POST'});
                 const data = await res.json();
-                if(data.success) startQRPoll();
-                else Swal.fire('Error', data.message, 'error');
-            } catch(e) { Swal.fire('Error', 'Gagal memulai add device', 'error'); }
+                if(data.success) {
+                    startQRPoll();
+                } else {
+                    Swal.fire('Error', data.message, 'error');
+                    document.getElementById('qr-area').classList.add('hidden');
+                }
+            } catch(e) { 
+                Swal.fire('Error', 'Gagal memulai add device', 'error'); 
+                document.getElementById('qr-area').classList.add('hidden');
+            }
         }
 
         let qrPollInterval;
         function startQRPoll() {
             if(qrPollInterval) clearInterval(qrPollInterval);
             let lastQR = "";
+            let retryCount = 0;
+            
             qrPollInterval = setInterval(async () => {
                 try {
+                    // Poll for the "NEW" device QR or status
                     const res = await fetchAuth('/api/device/qr');
                     const data = await res.json();
+                    
                     if(data.success && data.qr) {
                         if(data.qr !== lastQR) {
                             lastQR = data.qr;
                             document.getElementById('qrcode').innerHTML = '';
                             new QRCode(document.getElementById("qrcode"), { text: data.qr, width: 200, height: 200 });
                         }
-                    } else if (!data.success && data.message && data.message.includes("connected")) {
+                    } else if (data.message && data.message.toLowerCase().includes("connected")) {
                         clearInterval(qrPollInterval);
                         document.getElementById('qr-area').classList.add('hidden');
-                        Swal.fire('Berhasil', 'Perangkat terhubung!', 'success');
+                        Swal.fire('Berhasil', 'Perangkat berhasil ditautkan!', 'success');
                         loadDevices();
+                    } else if (!data.success) {
+                        // Handle generic errors or wait
+                        retryCount++;
+                        if(retryCount > 30) { // Timeout after ~1 minute
+                             clearInterval(qrPollInterval);
+                             document.getElementById('qr-area').classList.add('hidden');
+                             Swal.fire('Timeout', 'Waktu pemindaian habis. Silakan coba lagi.', 'warning');
+                        }
                     }
-                } catch(e) {}
+                } catch(e) {
+                    console.error("QR Poll Error", e);
+                }
             }, 2000);
         }
 
-        function cancelAddDevice() {
+        async function cancelAddDevice() {
             if(qrPollInterval) clearInterval(qrPollInterval);
             document.getElementById('qr-area').classList.add('hidden');
+            
+            // Clean up backend "NEW" session
+            try {
+                 await fetchAuth('/api/device/NEW', { method: 'DELETE' });
+            } catch(e) { console.error("Error cancelling device", e); }
         }
 
         async function deleteDevice(jid) {
-            if(confirm("Hapus perangkat ini?")) {
+            const result = await Swal.fire({
+                title: 'Hapus Perangkat?',
+                text: "Perangkat ini akan diputuskan dari bot.",
+                icon: 'warning',
+                showCancelButton: true,
+                confirmButtonColor: '#d33',
+                cancelButtonColor: '#3085d6',
+                confirmButtonText: 'Ya, Hapus',
+                cancelButtonText: 'Batal'
+            });
+
+            if (result.isConfirmed) {
                 try {
-                    await fetchAuth('/api/device/delete', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({jid: jid}) });
+                    // Use DELETE method instead of POST
+                    const res = await fetchAuth('/api/device/' + encodeURIComponent(jid), { 
+                        method: 'DELETE'
+                    });
+                    const data = await res.json();
+                    
+                    if(data.success) {
+                        Swal.fire('Terhapus', 'Perangkat berhasil dihapus.', 'success');
+                        loadDevices();
+                    } else {
+                        throw new Error(data.message || 'Gagal menghapus');
+                    }
+                } catch(e) { 
+                    Swal.fire('Error', 'Gagal menghapus perangkat: ' + e.message, 'error'); 
+                }
+            }
+        }
+
+        async function setPrimaryDevice(jid) {
+            try {
+                const res = await fetchAuth('/api/device/' + encodeURIComponent(jid) + '/primary', {
+                    method: 'POST'
+                });
+                const data = await res.json();
+                
+                if(data.success) {
+                    Swal.fire('Berhasil', 'Perangkat berhasil dijadikan utama untuk OTP.', 'success');
                     loadDevices();
-                } catch(e) { alert("Gagal hapus"); }
+                } else {
+                    Swal.fire('Gagal', data.message || 'Gagal mengubah perangkat utama', 'error');
+                }
+            } catch(e) {
+                console.error(e);
+                Swal.fire('Error', 'Terjadi kesalahan sistem', 'error');
             }
         }
 
