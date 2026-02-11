@@ -47,7 +47,8 @@ type ProviderConfig struct {
 }
 
 type DBConfig struct {
-	Type     string `json:"type"` // "mysql" or "postgres"
+	Enabled  bool   `json:"enabled"` // Added field
+	Type     string `json:"type"`    // "mysql" or "postgres"
 	Host     string `json:"host"`
 	Port     string `json:"port"`
 	User     string `json:"user"`
@@ -1825,6 +1826,9 @@ func saveConfig() {
 }
 
 func connectAppDB() {
+	if !cfg.Database.Enabled {
+		return
+	}
 	if cfg.Database.Type == "" {
 		return
 	}
@@ -2086,11 +2090,14 @@ func fetchOpenAICompatibleModels(apiKey, baseURL, provider string) ([]string, er
 			strings.Contains(id, "moderation") ||
 			strings.Contains(id, "babbage") ||
 			strings.Contains(id, "davinci") ||
+			strings.Contains(id, "ada") ||
+			strings.Contains(id, "curie") ||
 			strings.Contains(id, "gpt-4-base") ||
 			strings.Contains(id, "instruct") ||
 			strings.Contains(id, "realtime") ||
 			strings.Contains(id, "search") ||
-			strings.Contains(id, "similarity") {
+			strings.Contains(id, "similarity") ||
+			strings.Contains(id, "classifier") {
 			continue
 		}
 		names = append(names, m.ID)
