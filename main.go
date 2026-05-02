@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"database/sql"
+
 	"golang.org/x/crypto/bcrypt"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -1851,6 +1852,14 @@ func handleUserEvent(userID int, cli *whatsmeow.Client, evt interface{}) {
 
 		// AI Reply
 		go func() {
+			// Send typing indicator
+			ctxTyping, cancelTyping := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancelTyping()
+			cli.SendChatPresence(ctxTyping, types.ChatPresenceComposing, v.Info.Chat)
+
+			// Add random delay to mimic human typing (5-30 seconds) and reduce ban risk
+			time.Sleep(time.Duration(rand.Intn(25)+5) * time.Second)
+
 			reply := callAI(msg)
 
 			historyMutex.Lock()
@@ -1861,6 +1870,11 @@ func handleUserEvent(userID int, cli *whatsmeow.Client, evt interface{}) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			cli.SendMessage(ctx, v.Info.Chat, &waE2E.Message{Conversation: &reply})
+
+			// Stop typing indicator (optional, as sending message usually stops it)
+			ctxStop, cancelStop := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancelStop()
+			cli.SendChatPresence(ctxStop, types.ChatPresenceAvailable, v.Info.Chat)
 		}()
 
 	case *events.Connected:
