@@ -1854,9 +1854,16 @@ func handleUserEvent(userID int, cli *whatsmeow.Client, evt interface{}) {
 		// AI Reply
 		go func() {
 			// Send typing indicator
-			ctxTyping, cancelTyping := context.WithTimeout(context.Background(), 10*time.Second)
+			ctxTyping, cancelTyping := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancelTyping()
-			cli.SendChatPresence(ctxTyping, v.Info.Chat, types.ChatPresenceComposing, types.ChatPresenceMediaText)
+			if err := cli.SendChatPresence(ctxTyping, v.Info.Chat, types.ChatPresenceComposing, types.ChatPresenceMediaText); err != nil {
+				log.Println("Failed to send typing indicator:", err)
+			} else {
+				log.Println("Typing indicator sent to", v.Info.Chat.User)
+			}
+
+			// Small delay to ensure typing appears
+			time.Sleep(2 * time.Second)
 
 			// Add random delay to mimic human typing (5-30 seconds) and reduce ban risk
 			time.Sleep(time.Duration(rand.Intn(25)+5) * time.Second)
@@ -1872,10 +1879,12 @@ func handleUserEvent(userID int, cli *whatsmeow.Client, evt interface{}) {
 			defer cancel()
 			cli.SendMessage(ctx, v.Info.Chat, &waE2E.Message{Conversation: &reply})
 
-			// Stop typing indicator (optional, as sending message usually stops it)
-			ctxStop, cancelStop := context.WithTimeout(context.Background(), 10*time.Second)
+			// Stop typing indicator
+			ctxStop, cancelStop := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancelStop()
-			cli.SendChatPresence(ctxStop, v.Info.Chat, types.ChatPresencePaused, types.ChatPresenceMediaText)
+			if err := cli.SendChatPresence(ctxStop, v.Info.Chat, types.ChatPresencePaused, types.ChatPresenceMediaText); err != nil {
+				log.Println("Failed to stop typing indicator:", err)
+			}
 		}()
 
 	case *events.Connected:
