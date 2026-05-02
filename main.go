@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"math/big"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
@@ -1855,7 +1856,7 @@ func handleUserEvent(userID int, cli *whatsmeow.Client, evt interface{}) {
 			// Send typing indicator
 			ctxTyping, cancelTyping := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancelTyping()
-			cli.SendChatPresence(ctxTyping, types.ChatPresenceComposing, v.Info.Chat)
+			cli.SendChatPresence(ctxTyping, v.Info.Chat, types.ChatPresenceComposing, types.ChatPresenceMediaText)
 
 			// Add random delay to mimic human typing (5-30 seconds) and reduce ban risk
 			time.Sleep(time.Duration(rand.Intn(25)+5) * time.Second)
@@ -1874,7 +1875,7 @@ func handleUserEvent(userID int, cli *whatsmeow.Client, evt interface{}) {
 			// Stop typing indicator (optional, as sending message usually stops it)
 			ctxStop, cancelStop := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancelStop()
-			cli.SendChatPresence(ctxStop, types.ChatPresenceAvailable, v.Info.Chat)
+			cli.SendChatPresence(ctxStop, v.Info.Chat, types.ChatPresencePaused, types.ChatPresenceMediaText)
 		}()
 
 	case *events.Connected:
