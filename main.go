@@ -48,6 +48,15 @@ type ProviderConfig struct {
 	BaseURL string `json:"base_url"`
 }
 
+type ModelDetail struct {
+	ID            string `json:"id"`
+	Provider      string `json:"provider,omitempty"`
+	Status        string `json:"status,omitempty"`
+	ContextWindow string `json:"context_window,omitempty"`
+	InputCost     string `json:"input_cost,omitempty"`
+	OutputCost    string `json:"output_cost,omitempty"`
+}
+
 type DBConfig struct {
 	Enabled  bool   `json:"enabled"` // Added field
 	Type     string `json:"type"`    // "mysql" or "postgres"
@@ -2380,6 +2389,14 @@ func fetchModelsHandler(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 	}
 
+	if provider == "sumopod" {
+		details, detailErr := fetchSumopodModelDetails(apiKey, baseURL, models)
+		if detailErr != nil {
+			log.Println("Sumopod model details unavailable:", detailErr)
+		}
+		return c.JSON(fiber.Map{"models": models, "model_details": details})
+	}
+
 	return c.JSON(fiber.Map{"models": models})
 }
 
@@ -2434,6 +2451,140 @@ func fetchGeminiModels(apiKey, baseURL string) ([]string, error) {
 		}
 	}
 	return names, nil
+}
+
+func fetchSumopodModelDetails(apiKey, baseURL string, modelIDs []string) ([]ModelDetail, error) {
+	if baseURL == "" {
+		baseURL = "https://ai.sumopod.com/v1"
+	}
+	baseURL = strings.TrimSuffix(baseURL, "/")
+
+	detailsByID := make(map[string]ModelDetail, len(modelIDs))
+	for _, id := range modelIDs {
+		detailsByID[id] = ModelDetail{ID: id}
+	}
+
+	urls := []string{baseURL + "/model/info", baseURL + "/models"}
+	var lastErr error
+	for _, endpoint := range urls {
+		items, err := fetchModelMetadata(endpoint, apiKey)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		for _, item := range items {
+			id := firstString(item, "id", "model_name", "model", "name")
+			if id == "" {
+				if params, ok := item["litellm_params"].(map[string]interface{}); ok {
+					id = firstString(params, "model", "model_name")
+				}
+			}
+			if id == "" {
+				continue
+			}
+
+			detail := detailsByID[id]
+			if detail.ID == "" {
+				detail.ID = id
+			}
+			if info, ok := item["model_info"].(map[string]interface{}); ok {
+				mergeModelDetail(&detail, info)
+			}
+			if params, ok := item["litellm_params"].(map[string]interface{}); ok {
+				if detail.Provider == "" {
+					detail.Provider = firstString(params, "custom_llm_provider", "provider")
+				}
+			}
+			mergeModelDetail(&detail, item)
+			detailsByID[id] = detail
+		}
+		break
+	}
+
+	details := make([]ModelDetail, 0, len(modelIDs))
+	for _, id := range modelIDs {
+		detail := detailsByID[id]
+		if detail.ID == "" {
+			detail.ID = id
+		}
+		details = append(details, detail)
+	}
+	return details, lastErr
+}
+
+func fetchModelMetadata(endpoint, apiKey string) ([]map[string]interface{}, error) {
+	req, _ := http.NewRequest("GET", endpoint, nil)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("API Error: %s", string(body))
+	}
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	rawItems, ok := result["data"].([]interface{})
+	if !ok {
+		rawItems, ok = result["model_info"].([]interface{})
+	}
+	if !ok {
+		rawItems, ok = result["models"].([]interface{})
+	}
+	if !ok {
+		return nil, fmt.Errorf("model metadata response did not contain a model list")
+	}
+
+	items := make([]map[string]interface{}, 0, len(rawItems))
+	for _, raw := range rawItems {
+		if item, ok := raw.(map[string]interface{}); ok {
+			items = append(items, item)
+		}
+	}
+	return items, nil
+}
+
+func mergeModelDetail(detail *ModelDetail, item map[string]interface{}) {
+	if detail.Provider == "" {
+		detail.Provider = firstString(item, "provider", "custom_llm_provider", "owned_by")
+	}
+	if detail.Status == "" {
+		detail.Status = firstString(item, "status", "discount", "promotion", "pricing_status")
+	}
+	if detail.ContextWindow == "" {
+		detail.ContextWindow = firstValue(item, "context_window", "max_tokens", "max_input_tokens", "input_token_limit")
+	}
+	if detail.InputCost == "" {
+		detail.InputCost = firstValue(item, "input_cost_per_token", "input_cost_per_1m_tokens", "prompt_cost", "input_price")
+	}
+	if detail.OutputCost == "" {
+		detail.OutputCost = firstValue(item, "output_cost_per_token", "output_cost_per_1m_tokens", "completion_cost", "output_price")
+	}
+}
+
+func firstString(item map[string]interface{}, keys ...string) string {
+	for _, key := range keys {
+		if val, ok := item[key].(string); ok && val != "" {
+			return val
+		}
+	}
+	return ""
+}
+
+func firstValue(item map[string]interface{}, keys ...string) string {
+	for _, key := range keys {
+		if val, ok := item[key]; ok && val != nil {
+			return fmt.Sprintf("%v", val)
+		}
+	}
+	return ""
 }
 
 func fetchOpenAICompatibleModels(apiKey, baseURL, provider string) ([]string, error) {
