@@ -92,6 +92,27 @@
         </div>
     </div>
 
+    <!-- CSRF Protection: Override fetch to include token -->
+    <script>
+        function getCookie(name) {
+            let match = document.cookie.match(new RegExp('(^| )' + name + '=([^;]+)'));
+            return match ? decodeURIComponent(match[2]) : null;
+        }
+        const originalFetch = window.fetch;
+        window.fetch = function(url, options) {
+            options = options || {};
+            const method = options.method ? options.method.toUpperCase() : 'GET';
+            if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(method)) {
+                options.headers = options.headers || {};
+                if (!options.headers['X-CSRF-Token']) {
+                    const token = getCookie('csrf_token');
+                    if (token) options.headers['X-CSRF-Token'] = token;
+                }
+            }
+            return originalFetch(url, options);
+        };
+    </script>
+
     <script>
         document.getElementById('loginForm').addEventListener('submit', async function(e) {
             e.preventDefault();

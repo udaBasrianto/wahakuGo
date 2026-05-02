@@ -649,21 +649,44 @@
             {id: 'europe-west9', name: 'Europe West (Paris)'},
         ];
 
+        // CSRF Token helper
+        function getCookie(name) {
+            let match = document.cookie.match(new RegExp('(^| )' + name + '=([^;]+)'));
+            return match ? decodeURIComponent(match[2]) : null;
+        }
+
+        function escapeHTML(value) {
+            return String(value ?? '').replace(/[&<>"']/g, char => ({
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#39;'
+            }[char]));
+        }
+
         // Helper for Authenticated Fetch
         async function fetchAuth(url, options = {}) {
             options.credentials = 'include'; // Ensure cookies are sent
+            // Add CSRF token for unsafe HTTP methods
+            const method = options.method ? options.method.toUpperCase() : 'GET';
+            if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(method)) {
+                options.headers = options.headers || {};
+                if (!options.headers['X-CSRF-Token']) {
+                    const token = getCookie('csrf_token');
+                    if (token) options.headers['X-CSRF-Token'] = token;
+                }
+            }
             try {
                 const res = await fetch(url, options);
                 if (res.status === 401) {
                     window.location.href = '/login';
-                    // Return a dummy promise that never resolves to pause execution until redirect?
-                    // No, just throw to break flow.
                     throw new Error("Unauthorized - Redirecting to login...");
                 }
                 return res;
             } catch (e) {
                 if (e.message.includes("Unauthorized")) throw e;
-                throw e; // Re-throw other errors
+                throw e;
             }
         }
 
@@ -784,18 +807,21 @@
                     return;
                 }
                 
-                list.innerHTML = data.contacts.map(jid => `
-                    <div onclick="loadChatLogs('${jid}')" class="p-4 hover:bg-blue-50 cursor-pointer transition border-l-4 border-transparent hover:border-blue-500 ${currentJID === jid ? 'bg-blue-50 border-blue-500' : ''}">
+                list.innerHTML = data.contacts.map(jid => {
+                    const safeJid = escapeHTML(jid);
+                    const encodedJid = encodeURIComponent(jid);
+                    return `
+                    <div onclick="loadChatLogs(decodeURIComponent('${encodedJid}'))" class="p-4 hover:bg-blue-50 cursor-pointer transition border-l-4 border-transparent hover:border-blue-500 ${currentJID === jid ? 'bg-blue-50 border-blue-500' : ''}">
                         <div class="flex items-center gap-3">
                             <div class="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center text-gray-500 text-xs font-mono">
-                                ${jid.substring(0,2)}
+                                ${escapeHTML(jid.substring(0,2))}
                             </div>
                             <div class="overflow-hidden">
-                                <h4 class="font-medium text-gray-800 text-sm truncate">${jid}</h4>
+                                <h4 class="font-medium text-gray-800 text-sm truncate">${safeJid}</h4>
                             </div>
                         </div>
                     </div>
-                `).join('');
+                `}).join('');
              } catch(e) {
                 if (e.message.includes("Unauthorized")) return;
                 list.innerHTML = `<div class="p-4 text-center text-red-500 text-sm">Error: ${e.message}</div>`;
@@ -834,7 +860,7 @@
                     return `
                         <div class="flex flex-col ${isUser ? 'items-end' : 'items-start'}">
                             <div class="max-w-[80%] rounded-2xl px-4 py-2 shadow-sm ${isUser ? 'bg-blue-600 text-white rounded-tr-none' : 'bg-white border border-gray-100 text-gray-800 rounded-tl-none'}">
-                                <p class="text-sm whitespace-pre-wrap leading-relaxed">${log.message}</p>
+                                <p class="text-sm whitespace-pre-wrap leading-relaxed">${escapeHTML(log.message)}</p>
                             </div>
                             <span class="text-[10px] text-gray-400 mt-1 mx-1">${new Date(log.timestamp).toLocaleTimeString()}</span>
                         </div>
@@ -921,6 +947,7 @@
         // Core Data Loading
         async function loadData() {
             try {
+                let isAdmin = false;
                 // Ensure loader is visible if refreshing manually
                 // document.getElementById('loading-overlay').style.display = 'flex';
                 
@@ -930,6 +957,7 @@
                     // if (meRes.status === 401) { ... } // Handled by fetchAuth
                     if (meRes.ok) {
                         const me = await meRes.json();
+                        isAdmin = !!me.is_admin;
                         if (me.is_admin) {
                             const navUsers = document.getElementById('nav-users');
                             if (navUsers) navUsers.classList.remove('hidden');
@@ -937,10 +965,21 @@
                     }
                 } catch(e) { console.error("Failed to load user info", e); }
 
-                const res = await fetchAuth('/api/config');
-                // if (res.status === 401) { ... } // Handled by fetchAuth
-                if (!res.ok) throw new Error("Failed to load config");
-                currentConfig = await res.json();
+                if (isAdmin) {
+                    const res = await fetchAuth('/api/config');
+                    // if (res.status === 401) { ... } // Handled by fetchAuth
+                    if (!res.ok) throw new Error("Failed to load config");
+                    currentConfig = await res.json();
+                } else {
+                    currentConfig = {
+                        active_provider: '',
+                        system_prompt: '',
+                        saved_prompts: {},
+                        knowledge_urls: [],
+                        knowledge_files: [],
+                        providers: {}
+                    };
+                }
                 
                 renderUI();
                 loadDevices();
@@ -1814,10 +1853,7 @@
             let align = role === 'user' ? 'justify-end' : 'justify-start';
             let bg = role === 'user' ? 'bg-blue-600 text-white rounded-tr-none' : 'bg-white border border-gray-200 text-gray-800 rounded-tl-none';
             
-            // Format text (simple newlines to br and bold to strong)
-            // Use marked.js if available, otherwise simple regex
-            // Assuming we don't have marked.js loaded, use simple regex for now
-            let formattedText = text.replace(/\n/g, '<br>')
+            let formattedText = escapeHTML(text).replace(/\n/g, '<br>')
                                     .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
 
             const html = `

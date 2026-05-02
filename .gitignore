@@ -27,9 +27,9 @@ Thumbs.db
 # Node modules
 node_modules/
 
-# Config (Optional: Exclude if contains sensitive keys, but including for convenience as per user request context)
-# config.json 
-# If you want to keep config private, uncomment above line. For now, we assume user wants to deploy it.
+# Config with local credentials
+config.json
+deploy/config.json
 
 # Editor
 .vscode/

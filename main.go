@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net/http"
 	"net/url"
 	"os"
@@ -16,13 +18,13 @@ import (
 	"sync"
 	"time"
 
-	"math/rand"
-
 	"database/sql"
+	"golang.org/x/crypto/bcrypt"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
+	"github.com/gofiber/fiber/v2/middleware/csrf"
 	"github.com/gofiber/fiber/v2/middleware/session"
 	_ "github.com/lib/pq" // PostgreSQL Driver
 	"go.mau.fi/whatsmeow"
@@ -98,7 +100,13 @@ var (
 	authDB        *sql.DB                     // SQLite for Users
 	chatHistories = make(map[string][]string) // Chat History Memory
 	historyMutex  sync.Mutex                  // Mutex for Chat History
+
+	// Simple in-memory rate limiter for auth endpoints
+	authRateLimitMap = make(map[string][]time.Time)
+	authRateLimitMux sync.RWMutex
 )
+
+const redactedSecret = "__REDACTED__"
 
 type User struct {
 	ID       int    `json:"id"`
@@ -128,9 +136,174 @@ type FollowupTask struct {
 	CreatedAt     time.Time `json:"created_at"`
 }
 
+// ========== PASSWORD UTILITIES ==========
+
+// hashPassword creates a bcrypt hash from a plain password
+func hashPassword(password string) (string, error) {
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return "", err
+	}
+	return string(hash), nil
+}
+
+// checkPassword compares a plain password with a bcrypt hash
+// Returns nil if match, error otherwise
+func checkPassword(password, hash string) error {
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+}
+
+// isPasswordHashed checks if a password string is already bcrypt hashed
+func isPasswordHashed(password string) bool {
+	// bcrypt hashes start with $2a$, $2b$, or $2y$
+	return strings.HasPrefix(password, "$2a$") ||
+		strings.HasPrefix(password, "$2b$") ||
+		strings.HasPrefix(password, "$2y$")
+}
+
+// migrateUserPassword upgrades a plaintext password to bcrypt hash
+func migrateUserPassword(userID int, plaintextPassword string) {
+	hashed, err := hashPassword(plaintextPassword)
+	if err != nil {
+		log.Println("Failed to migrate password for user", userID, ":", err)
+		return
+	}
+	_, err = authDB.Exec("UPDATE users SET password = ? WHERE id = ?", hashed, userID)
+	if err != nil {
+		log.Println("Failed to update password during migration for user", userID, ":", err)
+	} else {
+		log.Printf("Password migrated to bcrypt for user ID: %d", userID)
+	}
+}
+
+// generateSecureOTP creates a 6-digit cryptographically secure OTP
+func generateSecureOTP() (string, error) {
+	// Generate random number between 0 and 999999
+	otpInt, err := rand.Int(rand.Reader, big.NewInt(1000000))
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%06d", otpInt), nil
+}
+
+// rateLimitMiddleware limits auth requests to 5 per minute per IP
+func rateLimitMiddleware(c *fiber.Ctx) error {
+	ip := c.IP()
+	if ip == "" {
+		ip = "unknown"
+	}
+
+	now := time.Now()
+	window := time.Minute
+	maxAttempts := 5
+
+	authRateLimitMux.Lock()
+	defer authRateLimitMux.Unlock()
+
+	// Get timestamps for this IP
+	timestamps := authRateLimitMap[ip]
+
+	// Remove timestamps older than window
+	cutoff := now.Add(-window)
+	newTimestamps := make([]time.Time, 0, maxAttempts)
+	for _, ts := range timestamps {
+		if ts.After(cutoff) {
+			newTimestamps = append(newTimestamps, ts)
+		}
+	}
+
+	// Check if limit exceeded
+	if len(newTimestamps) >= maxAttempts {
+		// Calculate reset time (time of oldest attempt + window)
+		oldest := newTimestamps[0]
+		resetTime := oldest.Add(window)
+		waitDuration := time.Until(resetTime)
+		if waitDuration < 0 {
+			waitDuration = 0
+		}
+		return c.Status(429).JSON(fiber.Map{
+			"success": false,
+			"message": fmt.Sprintf("Terlalu banyak permintaan. Coba lagi dalam %s", waitDuration.Round(time.Second)),
+		})
+	}
+
+	// Add current timestamp and allow
+	newTimestamps = append(newTimestamps, now)
+	authRateLimitMap[ip] = newTimestamps
+
+	return c.Next()
+}
+
+func isProduction() bool {
+	env := strings.ToLower(os.Getenv("APP_ENV"))
+	return env == "production" || env == "prod"
+}
+
+func requireAdmin(c *fiber.Ctx) error {
+	if isAdmin, ok := c.Locals("isAdmin").(bool); ok && isAdmin {
+		return c.Next()
+	}
+	return c.Status(403).JSON(fiber.Map{"success": false, "message": "Requires Admin privileges"})
+}
+
+func redactSecret(value string) string {
+	if value == "" {
+		return ""
+	}
+	return redactedSecret
+}
+
+func isRedactedSecret(value string) bool {
+	return value == redactedSecret || value == "********"
+}
+
+func redactedConfig(src Config) Config {
+	dst := src
+	dst.AdminPassword = redactSecret(dst.AdminPassword)
+	dst.Database.Password = redactSecret(dst.Database.Password)
+	dst.Sheet.CredentialsJSON = redactSecret(dst.Sheet.CredentialsJSON)
+
+	if src.Providers != nil {
+		dst.Providers = make(map[string]ProviderConfig, len(src.Providers))
+		for name, provider := range src.Providers {
+			provider.APIKey = redactSecret(provider.APIKey)
+			dst.Providers[name] = provider
+		}
+	}
+
+	return dst
+}
+
+func preserveRedactedSecrets(next *Config, current Config) {
+	if isRedactedSecret(next.AdminPassword) {
+		next.AdminPassword = current.AdminPassword
+	}
+	if isRedactedSecret(next.Database.Password) {
+		next.Database.Password = current.Database.Password
+	}
+	if isRedactedSecret(next.Sheet.CredentialsJSON) {
+		next.Sheet.CredentialsJSON = current.Sheet.CredentialsJSON
+	}
+
+	if next.Providers == nil {
+		next.Providers = make(map[string]ProviderConfig)
+	}
+	for name, provider := range next.Providers {
+		if isRedactedSecret(provider.APIKey) {
+			if existing, ok := current.Providers[name]; ok {
+				provider.APIKey = existing.APIKey
+				next.Providers[name] = provider
+			}
+		}
+	}
+}
+
 func main() {
 	// 1. Load Config
 	loadConfig()
+
+	// Overlay sensitive credentials from environment variables for security
+	overlayEnvConfig()
 
 	// Connect to DB & Sheets in background
 	go func() {
@@ -147,7 +320,9 @@ func main() {
 	if err != nil {
 		log.Fatal("Failed to open Shared DB:", err)
 	}
-	sharedDB.SetMaxOpenConns(1) // Force single connection for SQLite to ensure safety
+	sharedDB.SetMaxOpenConns(5)
+	sharedDB.SetMaxIdleConns(5)
+	sharedDB.SetConnMaxLifetime(time.Hour)
 
 	// Init Whatsmeow with shared DB
 	container = sqlstore.NewWithDB(sharedDB, "sqlite", dbLog)
@@ -264,7 +439,19 @@ func main() {
 	var count int
 	authDB.QueryRow("SELECT COUNT(*) FROM users WHERE username = ?", cfg.AdminUsername).Scan(&count)
 	if count == 0 {
-		authDB.Exec("INSERT INTO users (username, password, is_admin, is_active) VALUES (?, ?, 1, 1)", cfg.AdminUsername, cfg.AdminPassword)
+		adminPassword := cfg.AdminPassword
+		if adminPassword == "" {
+			log.Println("Initial admin user was not created because admin_password/ADMIN_PASSWORD is empty")
+		} else {
+			if adminPassword != "" && !isPasswordHashed(adminPassword) {
+				if hashed, hashErr := hashPassword(adminPassword); hashErr == nil {
+					adminPassword = hashed
+				} else {
+					log.Println("Failed to hash initial admin password:", hashErr)
+				}
+			}
+			authDB.Exec("INSERT INTO users (username, password, is_admin, is_active) VALUES (?, ?, 1, 1)", cfg.AdminUsername, adminPassword)
+		}
 	}
 
 	// 3. Initialize Clients for existing users (lazy load or eager load)
@@ -277,13 +464,43 @@ func main() {
 
 	// 5. Setup Fiber
 	sessionStore = session.New(session.Config{
-		Expiration: 24 * time.Hour,
+		KeyLookup:      "cookie:session_id",
+		CookieHTTPOnly: true,
+		CookieSecure:   isProduction(),
+		CookieSameSite: "lax",
+		Expiration:     24 * time.Hour,
 	})
 
 	app := fiber.New(fiber.Config{
 		BodyLimit: 50 * 1024 * 1024, // 50MB Limit
 	})
-	app.Use(cors.New())
+	allowedOrigins := os.Getenv("CORS_ALLOW_ORIGINS")
+	if allowedOrigins == "" {
+		allowedOrigins = "http://localhost:" + cfg.AppPort + ",http://127.0.0.1:" + cfg.AppPort
+	}
+	app.Use(cors.New(cors.Config{
+		AllowOrigins:     allowedOrigins,
+		AllowCredentials: true,
+	}))
+
+	// CSRF Protection for state-changing endpoints
+	csrfMiddleware := csrf.New(csrf.Config{
+		KeyLookup:      "header:X-CSRF-Token",
+		CookieName:     "csrf_token",
+		CookieHTTPOnly: false, // Must be readable by JavaScript
+		CookieSecure:   isProduction(),
+		CookieSameSite: "Lax",
+		ErrorHandler: func(c *fiber.Ctx, err error) error {
+			if c.Accepts("application/json") == "application/json" {
+				return c.Status(403).JSON(fiber.Map{
+					"success": false,
+					"message": "CSRF token invalid or missing",
+				})
+			}
+			return c.Status(403).SendString("CSRF token invalid or missing")
+		},
+	})
+	app.Use(csrfMiddleware)
 
 	// Middleware Auth
 	app.Use(func(c *fiber.Ctx) error {
@@ -344,6 +561,8 @@ func main() {
 
 	// Auth Routes
 	auth := api.Group("/auth")
+	// Apply rate limiting to all auth endpoints
+	auth.Use(rateLimitMiddleware)
 	auth.Post("/login", func(c *fiber.Ctx) error {
 		var req struct {
 			Username string `json:"username"`
@@ -387,33 +606,27 @@ func main() {
 		}
 
 		passwordMatch := false
-		if user.Password != "" {
-			if req.Password == user.Password {
-				passwordMatch = true
-			}
-		} else {
-			passwordMatch = true
-		}
 
-		// Master Password check for Admin
-		if user.Username == cfg.AdminUsername && req.Password == cfg.AdminPassword {
-			passwordMatch = true
+		// Handle legacy plaintext passwords OR bcrypt hashed passwords
+		if user.Password != "" {
+			if isPasswordHashed(user.Password) {
+				// New: bcrypt verification
+				err = checkPassword(req.Password, user.Password)
+				if err == nil {
+					passwordMatch = true
+				}
+			} else {
+				// Legacy: plaintext comparison (migration path)
+				if req.Password == user.Password {
+					passwordMatch = true
+					// Migrate to hashed password on successful login
+					go migrateUserPassword(user.ID, req.Password)
+				}
+			}
 		}
 
 		if !passwordMatch {
 			return c.Status(401).JSON(fiber.Map{"success": false, "message": "Password salah"})
-		}
-
-		// Admin Bypass OTP
-		if user.Username == cfg.AdminUsername {
-			sess, err := sessionStore.Get(c)
-			if err == nil {
-				sess.Set("authenticated", true)
-				sess.Set("userID", user.ID)
-				sess.Set("isAdmin", true)
-				sess.Save()
-				return c.JSON(fiber.Map{"success": true, "message": "Login Admin Berhasil (OTP Bypass)"})
-			}
 		}
 
 		// Password is Valid -> Send OTP
@@ -444,8 +657,15 @@ func main() {
 		}
 
 		// Generate OTP
-		rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-		otp := fmt.Sprintf("%06d", rng.Intn(1000000))
+		otp, err := generateSecureOTP()
+		if err != nil {
+			log.Println("Failed to generate OTP:", err)
+			if user.Password != "" {
+				log.Printf("[LOGIN WARN] Failed to generate OTP, skipping for password-authenticated user: %s", user.Username)
+				return finalizeLogin()
+			}
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Gagal generate OTP"})
+		}
 
 		// Save OTP to session
 		sess, err := sessionStore.Get(c)
@@ -487,7 +707,7 @@ func main() {
 			return c.JSON(fiber.Map{"success": false, "message": "Gagal kirim OTP (Timeout). Pastikan bot terhubung."})
 		}
 
-		log.Printf("OTP Sent to %s: %s (ID: %s)", targetJID.User, otp, resp.ID)
+		log.Printf("OTP Sent to %s (ID: %s, Length: %d)", targetJID.User, resp.ID, len(otp))
 		return c.JSON(fiber.Map{"success": true, "require_otp": true, "message": "OTP dikirim ke WhatsApp"})
 	})
 
@@ -546,6 +766,71 @@ func main() {
 		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Kode OTP salah"})
 	})
 
+	// Resend OTP endpoint
+	auth.Post("/resend-otp", func(c *fiber.Ctx) error {
+		sess, err := sessionStore.Get(c)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Session Error"})
+		}
+
+		// Check if there's a pending verification
+		pendingUserID := sess.Get("pending_user_id")
+		if pendingUserID == nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Tidak ada permintaan verifikasi yang active"})
+		}
+
+		userID := pendingUserID.(int)
+
+		// Fetch user from database
+		var user User
+		err = authDB.QueryRow("SELECT id, username, COALESCE(email, ''), COALESCE(password, ''), COALESCE(is_admin, 0), COALESCE(is_active, 0) FROM users WHERE id = ?", userID).
+			Scan(&user.ID, &user.Username, &user.Email, &user.Password, &user.IsAdmin, &user.IsActive)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"success": false, "message": "User tidak ditemukan"})
+		}
+
+		// Check if system bot is available
+		sysClient := getSystemBot()
+		if sysClient == nil || !sysClient.IsConnected() {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Sistem Bot belum terhubung, tidak bisa kirim OTP"})
+		}
+
+		// Generate new OTP
+		otp, err := generateSecureOTP()
+		if err != nil {
+			log.Println("Failed to generate OTP for resend:", err)
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Gagal generate OTP"})
+		}
+
+		// Update session with new OTP
+		sess.Set("otp", otp)
+		sess.Set("otp_expiry", time.Now().Add(5*time.Minute).Unix())
+		sess.Save()
+
+		// Send OTP via WhatsApp
+		targetJID := types.NewJID(user.Username, types.DefaultUserServer)
+		if sysClient.Store.ID != nil && targetJID.User == sysClient.Store.ID.User {
+			targetJID = *sysClient.Store.ID
+			targetJID.Device = 0
+		}
+
+		msg := &waE2E.Message{
+			Conversation: proto.String("🔐 Kode Verifikasi (Ulang): *" + otp + "*\n\nMasukkan kode ini untuk menyelesaikan verifikasi."),
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		resp, err := sysClient.SendMessage(ctx, targetJID, msg)
+		if err != nil {
+			log.Println("Failed to send resend OTP:", err)
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Gagal kirim OTP"})
+		}
+
+		log.Printf("OTP Resent to %s: ID=%s", targetJID.User, resp.ID)
+		return c.JSON(fiber.Map{"success": true, "message": "Kode OTP baru telah dikirim"})
+	})
+
 	auth.Post("/register", func(c *fiber.Ctx) error {
 		var req struct {
 			Username string `json:"username"`
@@ -570,8 +855,18 @@ func main() {
 		if len(req.Username) < 10 {
 			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Nomor WhatsApp tidak valid (Wajib)"})
 		}
+		if len(req.Password) < 8 {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Password minimal 8 karakter"})
+		}
 
-		_, err := authDB.Exec("INSERT INTO users (username, email, password, is_admin, is_active) VALUES (?, ?, ?, 0, 0)", req.Username, req.Email, req.Password)
+		// Hash password before storing
+		hashedPassword, err := hashPassword(req.Password)
+		if err != nil {
+			log.Println("Failed to hash password:", err)
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Gagal memproses password"})
+		}
+
+		_, err = authDB.Exec("INSERT INTO users (username, email, password, is_admin, is_active) VALUES (?, ?, ?, 0, 0)", req.Username, req.Email, hashedPassword)
 		if err != nil {
 			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Nomor WhatsApp atau Email sudah terdaftar"})
 		}
@@ -582,8 +877,11 @@ func main() {
 			return c.JSON(fiber.Map{"success": true, "require_otp": false, "message": "Pendaftaran berhasil. Bot belum terhubung, tidak bisa kirim OTP."})
 		}
 
-		rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-		otp := fmt.Sprintf("%06d", rng.Intn(1000000))
+		otp, err := generateSecureOTP()
+		if err != nil {
+			log.Println("Failed to generate OTP:", err)
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Gagal generate OTP"})
+		}
 
 		var userID int
 		authDB.QueryRow("SELECT id FROM users WHERE username = ?", req.Username).Scan(&userID)
@@ -620,7 +918,7 @@ func main() {
 			return c.JSON(fiber.Map{"success": true, "require_otp": true, "message": "Pendaftaran berhasil, tapi gagal kirim OTP. Silakan login ulang."})
 		}
 
-		log.Printf("Register OTP Sent to %s: %s (ID: %s)", targetJID.User, otp, resp.ID)
+		log.Printf("Register OTP Sent to %s (ID: %s, Length: %d)", targetJID.User, resp.ID, len(otp))
 
 		return c.JSON(fiber.Map{"success": true, "require_otp": true, "message": "Pendaftaran berhasil. Masukkan kode OTP yang dikirim ke WhatsApp."})
 	})
@@ -676,15 +974,16 @@ func main() {
 		})
 	})
 
-	api.Get("/config", func(c *fiber.Ctx) error {
-		return c.JSON(cfg)
+	api.Get("/config", requireAdmin, func(c *fiber.Ctx) error {
+		return c.JSON(redactedConfig(cfg))
 	})
 
-	api.Post("/config", func(c *fiber.Ctx) error {
+	api.Post("/config", requireAdmin, func(c *fiber.Ctx) error {
 		var newCfg Config
 		if err := c.BodyParser(&newCfg); err != nil {
 			return c.Status(400).JSON(fiber.Map{"error": "Invalid JSON"})
 		}
+		preserveRedactedSecrets(&newCfg, cfg)
 		cfg = newCfg
 		saveConfig()
 		go connectAppDB()
@@ -750,29 +1049,56 @@ func main() {
 		return c.JSON(fiber.Map{"success": true})
 	})
 
-	// Upload/Delete File (unchanged)
+	// Upload/Delete File (with security validations)
 	api.Post("/upload", func(c *fiber.Ctx) error {
 		file, err := c.FormFile("file")
 		if err != nil {
 			return c.Status(400).JSON(fiber.Map{"error": "No file uploaded"})
 		}
-		path := "uploads/" + file.Filename
+
+		// Validate file size (max 10MB)
+		if file.Size > 10*1024*1024 {
+			return c.Status(400).JSON(fiber.Map{"error": "File terlalu besar (maksimal 10MB)"})
+		}
+
+		// Validate file extension
+		ext := strings.ToLower(filepath.Ext(file.Filename))
+		allowedExts := map[string]bool{
+			".pdf":  true,
+			".txt":  true,
+			".md":   true,
+			".doc":  true,
+			".docx": true,
+		}
+		if !allowedExts[ext] {
+			return c.Status(400).JSON(fiber.Map{"error": "Tipe file tidak diizinkan. Hanya PDF, TXT, MD, DOC, DOCX"})
+		}
+
+		// Sanitize filename: generate server-side name to avoid path traversal and collisions.
+		suffix, err := rand.Int(rand.Reader, big.NewInt(1000000))
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": "Failed to generate safe filename"})
+		}
+		safeFilename := fmt.Sprintf("%s_%06d%s", time.Now().Format("20060102_150405"), suffix.Int64(), ext)
+		path := "uploads/" + safeFilename
+
 		if err := c.SaveFile(file, path); err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": "Failed to save file"})
 		}
+
 		exists := false
 		for _, f := range cfg.KnowledgeFiles {
-			if f == file.Filename {
+			if f == safeFilename {
 				exists = true
 				break
 			}
 		}
 		if !exists {
-			cfg.KnowledgeFiles = append(cfg.KnowledgeFiles, file.Filename)
+			cfg.KnowledgeFiles = append(cfg.KnowledgeFiles, safeFilename)
 			saveConfig()
 			go refreshKnowledge()
 		}
-		return c.JSON(fiber.Map{"success": true, "filename": file.Filename})
+		return c.JSON(fiber.Map{"success": true, "filename": safeFilename, "original_filename": file.Filename})
 	})
 
 	api.Post("/delete-file", func(c *fiber.Ctx) error {
@@ -898,7 +1224,13 @@ func main() {
 			return c.Status(400).JSON(fiber.Map{"error": "Username already taken"})
 		}
 		if req.Password != "" {
-			authDB.Exec("UPDATE users SET username = ?, password = ? WHERE id = ?", req.Username, req.Password, userID)
+			// Hash password before updating
+			hashedPassword, err := hashPassword(req.Password)
+			if err != nil {
+				log.Println("Failed to hash password during profile update:", err)
+				return c.Status(500).JSON(fiber.Map{"error": "Failed to process password"})
+			}
+			authDB.Exec("UPDATE users SET username = ?, password = ? WHERE id = ?", req.Username, hashedPassword, userID)
 		} else {
 			authDB.Exec("UPDATE users SET username = ? WHERE id = ?", req.Username, userID)
 		}
@@ -1099,12 +1431,17 @@ func main() {
 	// Test AI
 	api.Post("/test-ai", func(c *fiber.Ctx) error {
 		var req struct {
-			Prompt string `json:"prompt"`
+			Prompt  string `json:"prompt"`
+			Message string `json:"message"`
 		}
 		if err := c.BodyParser(&req); err != nil {
 			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid JSON"})
 		}
-		reply := callAI(req.Prompt)
+		prompt := req.Prompt
+		if prompt == "" {
+			prompt = req.Message
+		}
+		reply := callAI(prompt)
 		return c.JSON(fiber.Map{"success": true, "reply": reply})
 	})
 
@@ -1209,8 +1546,13 @@ func main() {
 		if req.Username == "" || req.Password == "" {
 			return c.Status(400).JSON(fiber.Map{"error": "Username and Password required"})
 		}
-		_, err := authDB.Exec("INSERT INTO users (username, password, is_admin, is_active) VALUES (?, ?, ?, ?)",
-			req.Username, req.Password, req.IsAdmin, req.IsActive)
+		hashedPassword, err := hashPassword(req.Password)
+		if err != nil {
+			log.Println("Failed to hash admin-created password:", err)
+			return c.Status(500).JSON(fiber.Map{"error": "Failed to process password"})
+		}
+		_, err = authDB.Exec("INSERT INTO users (username, password, is_admin, is_active) VALUES (?, ?, ?, ?)",
+			req.Username, hashedPassword, req.IsAdmin, req.IsActive)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": "Username already exists or Database error"})
 		}
@@ -1232,8 +1574,13 @@ func main() {
 			return c.Status(400).JSON(fiber.Map{"error": "Invalid JSON"})
 		}
 		if req.Password != "" {
+			hashedPassword, err := hashPassword(req.Password)
+			if err != nil {
+				log.Println("Failed to hash admin-updated password:", err)
+				return c.Status(500).JSON(fiber.Map{"error": "Failed to process password"})
+			}
 			authDB.Exec("UPDATE users SET username = ?, password = ?, is_admin = ?, is_active = ? WHERE id = ?",
-				req.Username, req.Password, req.IsAdmin, req.IsActive, id)
+				req.Username, hashedPassword, req.IsAdmin, req.IsActive, id)
 		} else {
 			authDB.Exec("UPDATE users SET username = ?, is_admin = ?, is_active = ? WHERE id = ?",
 				req.Username, req.IsAdmin, req.IsActive, id)
@@ -1823,6 +2170,49 @@ func loadConfig() {
 func saveConfig() {
 	data, _ := json.MarshalIndent(cfg, "", "  ")
 	os.WriteFile(configFile, data, 0644)
+}
+
+// overlayEnvConfig overrides configuration with environment variables for security
+func overlayEnvConfig() {
+	// Provider API Keys from environment variables
+	envMappings := map[string]struct {
+		provider string
+		field    string
+		envVar   string
+	}{
+		"byteplus": {provider: "byteplus", field: "api_key", envVar: "BYTEPLUS_API_KEY"},
+		"openai":   {provider: "openai", field: "api_key", envVar: "OPENAI_API_KEY"},
+		"gemini":   {provider: "gemini", field: "api_key", envVar: "GEMINI_API_KEY"},
+		"groq":     {provider: "groq", field: "api_key", envVar: "GROQ_API_KEY"},
+		"qwen":     {provider: "qwen", field: "api_key", envVar: "QWEN_API_KEY"},
+		"deepseek": {provider: "deepseek", field: "api_key", envVar: "DEEPSEEK_API_KEY"},
+	}
+
+	for _, mapping := range envMappings {
+		if val, exists := os.LookupEnv(mapping.envVar); exists {
+			if p, ok := cfg.Providers[mapping.provider]; ok {
+				p.APIKey = val
+				cfg.Providers[mapping.provider] = p
+				log.Printf("API key for %s loaded from environment variable %s", mapping.provider, mapping.envVar)
+			}
+		}
+	}
+
+	// Google Service Account JSON from env var (for Vertex/Gemini)
+	if saJSON := os.Getenv("GOOGLE_SERVICE_ACCOUNT_JSON"); saJSON != "" {
+		if p, ok := cfg.Providers["vertex"]; ok {
+			p.APIKey = saJSON
+			cfg.Providers["vertex"] = p
+		}
+	}
+
+	// Admin credentials from environment (optional)
+	if adminUser := os.Getenv("ADMIN_USERNAME"); adminUser != "" {
+		cfg.AdminUsername = adminUser
+	}
+	if adminPass := os.Getenv("ADMIN_PASSWORD"); adminPass != "" {
+		cfg.AdminPassword = adminPass
+	}
 }
 
 func connectAppDB() {
