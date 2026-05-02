@@ -3,7 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
+	crand "crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -190,7 +190,7 @@ func migrateUserPassword(userID int, plaintextPassword string) {
 // generateSecureOTP creates a 6-digit cryptographically secure OTP
 func generateSecureOTP() (string, error) {
 	// Generate random number between 0 and 999999
-	otpInt, err := rand.Int(rand.Reader, big.NewInt(1000000))
+	otpInt, err := crand.Int(crand.Reader, big.NewInt(1000000))
 	if err != nil {
 		return "", err
 	}
@@ -1086,7 +1086,7 @@ func main() {
 		}
 
 		// Sanitize filename: generate server-side name to avoid path traversal and collisions.
-		suffix, err := rand.Int(rand.Reader, big.NewInt(1000000))
+		suffix, err := crand.Int(crand.Reader, big.NewInt(1000000))
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": "Failed to generate safe filename"})
 		}
