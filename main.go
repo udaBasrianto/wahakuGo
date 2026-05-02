@@ -1853,22 +1853,15 @@ func handleUserEvent(userID int, cli *whatsmeow.Client, evt interface{}) {
 
 		// AI Reply
 		go func() {
-			// Send typing indicator
-			ctxTyping, cancelTyping := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancelTyping()
-			if err := cli.SendChatPresence(ctxTyping, v.Info.Chat, types.ChatPresenceComposing, types.ChatPresenceMediaText); err != nil {
-				log.Println("Failed to send typing indicator:", err)
-			} else {
-				log.Println("Typing indicator sent to", v.Info.Chat.User)
-			}
-
-			// Small delay to ensure typing appears
-			time.Sleep(2 * time.Second)
+			log.Printf("[User %d] Received message: %s", userID, msg)
 
 			// Add random delay to mimic human typing (5-30 seconds) and reduce ban risk
-			time.Sleep(time.Duration(rand.Intn(25)+5) * time.Second)
+			delaySeconds := time.Duration(rand.Intn(25)+5) * time.Second
+			log.Printf("[User %d] Waiting %v before replying...", userID, delaySeconds)
+			time.Sleep(delaySeconds)
 
 			reply := callAI(msg)
+			log.Printf("[User %d] AI Reply: %s", userID, reply)
 
 			historyMutex.Lock()
 			chatHistories[userChatKey] = append(chatHistories[userChatKey], "Assistant: "+reply)
@@ -1877,13 +1870,11 @@ func handleUserEvent(userID int, cli *whatsmeow.Client, evt interface{}) {
 			// Reply using the SAME client that received the message
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			cli.SendMessage(ctx, v.Info.Chat, &waE2E.Message{Conversation: &reply})
-
-			// Stop typing indicator
-			ctxStop, cancelStop := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancelStop()
-			if err := cli.SendChatPresence(ctxStop, v.Info.Chat, types.ChatPresencePaused, types.ChatPresenceMediaText); err != nil {
-				log.Println("Failed to stop typing indicator:", err)
+			_, err := cli.SendMessage(ctx, v.Info.Chat, &waE2E.Message{Conversation: &reply})
+			if err != nil {
+				log.Printf("[User %d] Failed to send reply: %v", userID, err)
+			} else {
+				log.Printf("[User %d] Message sent successfully to %s", userID, v.Info.Chat.User)
 			}
 		}()
 
