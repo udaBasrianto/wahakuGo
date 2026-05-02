@@ -1955,6 +1955,8 @@ func callAI(prompt string) string {
 		return callGemini(pConfig.APIKey, pConfig.Model, pConfig.BaseURL, fullPrompt)
 	case "openai":
 		return callOpenAI(pConfig.APIKey, pConfig.Model, pConfig.BaseURL, fullPrompt)
+	case "sumopod":
+		return callSumopod(pConfig.APIKey, pConfig.Model, pConfig.BaseURL, fullPrompt)
 	case "deepseek":
 		return callDeepSeek(pConfig.APIKey, pConfig.Model, pConfig.BaseURL, fullPrompt)
 	case "byteplus":
@@ -2046,6 +2048,13 @@ func callOpenAI(apiKey, model, baseURL, prompt string) string {
 		}
 	}
 	return "Error: No response from OpenAI"
+}
+
+func callSumopod(apiKey, model, baseURL, prompt string) string {
+	if baseURL == "" {
+		baseURL = "https://ai.sumopod.com/v1"
+	}
+	return callOpenAI(apiKey, model, baseURL, prompt)
 }
 
 func callDeepSeek(apiKey, model, baseURL, prompt string) string {
@@ -2182,6 +2191,7 @@ func overlayEnvConfig() {
 	}{
 		"byteplus": {provider: "byteplus", field: "api_key", envVar: "BYTEPLUS_API_KEY"},
 		"openai":   {provider: "openai", field: "api_key", envVar: "OPENAI_API_KEY"},
+		"sumopod":  {provider: "sumopod", field: "api_key", envVar: "SUMOPOD_API_KEY"},
 		"gemini":   {provider: "gemini", field: "api_key", envVar: "GEMINI_API_KEY"},
 		"groq":     {provider: "groq", field: "api_key", envVar: "GROQ_API_KEY"},
 		"qwen":     {provider: "qwen", field: "api_key", envVar: "QWEN_API_KEY"},
@@ -2356,7 +2366,7 @@ func fetchModelsHandler(c *fiber.Ctx) error {
 	switch provider {
 	case "gemini":
 		models, err = fetchGeminiModels(apiKey, baseURL)
-	case "openai", "groq", "deepseek", "byteplus", "qwen":
+	case "openai", "sumopod", "groq", "deepseek", "byteplus", "qwen":
 		models, err = fetchOpenAICompatibleModels(apiKey, baseURL, provider)
 	case "vertex":
 		// Vertex requires complex auth (OAuth2 token), skipping for now.
@@ -2431,6 +2441,8 @@ func fetchOpenAICompatibleModels(apiKey, baseURL, provider string) ([]string, er
 		switch provider {
 		case "openai":
 			baseURL = "https://api.openai.com/v1"
+		case "sumopod":
+			baseURL = "https://ai.sumopod.com/v1"
 		case "groq":
 			baseURL = "https://api.groq.com/openai/v1"
 		case "deepseek":

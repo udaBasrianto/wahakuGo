@@ -208,6 +208,14 @@
                             <div class="lg:col-span-1 space-y-6">
                                 <div class="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
                                     <h3 class="text-lg font-bold text-gray-800 mb-4">AI Provider</h3>
+                                    <div class="mb-5 grid grid-cols-2 gap-2 bg-gray-100 p-1 rounded-xl">
+                                        <button type="button" id="mode-ai-brain" onclick="switchProviderMode('brain')" class="px-3 py-2 rounded-lg text-sm font-semibold transition">
+                                            <i class="fas fa-brain mr-1"></i> AI Brain
+                                        </button>
+                                        <button type="button" id="mode-sumopod" onclick="switchProviderMode('sumopod')" class="px-3 py-2 rounded-lg text-sm font-semibold transition">
+                                            <i class="fas fa-server mr-1"></i> Sumopod
+                                        </button>
+                                    </div>
                                     <div id="providerList" class="space-y-3"></div>
                                 </div>
                                 
@@ -726,6 +734,7 @@
             'gemini': {icon: 'fa-google', name: 'Google Gemini', color: 'text-blue-500'},
             'vertex': {icon: 'fa-cloud', name: 'Google Vertex AI', color: 'text-blue-600'},
             'openai': {icon: 'fa-bolt', name: 'OpenAI (GPT)', color: 'text-green-500'},
+            'sumopod': {icon: 'fa-server', name: 'Sumopod AI', color: 'text-cyan-600'},
             'groq':   {icon: 'fa-microchip', name: 'Groq (Fast)', color: 'text-orange-500'},
             'qwen':   {icon: 'fa-cloud', name: 'Qwen (Alibaba)', color: 'text-purple-500'},
             'byteplus': {icon: 'fa-music', name: 'BytePlus (Doubao)', color: 'text-pink-500'},
@@ -735,6 +744,7 @@
             'gemini': ['gemini-3.0-pro', 'gemini-3.0-flash', 'gemini-2.0-flash-exp', 'gemini-1.5-pro', 'gemini-1.5-flash'],
             'vertex': ['gemini-3.0-pro-001', 'gemini-3.0-flash-001', 'gemini-2.0-flash-001', 'gemini-1.5-pro-002', 'gemini-1.5-flash-002'],
             'openai': ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-3.5-turbo'],
+            'sumopod': [],
             'groq':   ['llama3-70b-8192', 'llama3-8b-8192', 'mixtral-8x7b-32768', 'gemma-7b-it'],
             'qwen':   ['qwen-turbo', 'qwen-plus', 'qwen-max'],
             'byteplus': ['doubao-pro-32k', 'doubao-lite-32k', 'doubao-pro-4k', 'doubao-lite-4k'],
@@ -1098,10 +1108,19 @@
             const list = document.getElementById('providerList');
             if (list) {
                 list.innerHTML = '';
+                const modeBrain = document.getElementById('mode-ai-brain');
+                const modeSumopod = document.getElementById('mode-sumopod');
+                const isSumopod = currentConfig.active_provider === 'sumopod';
+                if (modeBrain && modeSumopod) {
+                    modeBrain.className = `px-3 py-2 rounded-lg text-sm font-semibold transition ${!isSumopod ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`;
+                    modeSumopod.className = `px-3 py-2 rounded-lg text-sm font-semibold transition ${isSumopod ? 'bg-white text-cyan-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`;
+                }
                 Object.keys(providersInfo).forEach(key => {
                     const info = providersInfo[key];
                     const isActive = currentConfig.active_provider === key;
+                    const hiddenByMode = isSumopod ? key !== 'sumopod' : key === 'sumopod';
                     const div = document.createElement('div');
+                    div.className = hiddenByMode ? 'hidden' : '';
                     div.innerHTML = `
                         <label class="flex items-center justify-between p-3 rounded-xl border cursor-pointer transition-all hover:bg-gray-50 ${isActive ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-500' : 'border-gray-200'}">
                             <div class="flex items-center gap-3">
@@ -1125,6 +1144,9 @@
                 Object.keys(providersInfo).forEach(key => {
                     if (!currentConfig.providers) currentConfig.providers = {};
                     if (!currentConfig.providers[key]) currentConfig.providers[key] = { api_key: "", model: "", base_url: "" };
+                    if (key === 'sumopod' && !currentConfig.providers[key].base_url) {
+                        currentConfig.providers[key].base_url = 'https://ai.sumopod.com/v1';
+                    }
                     const data = currentConfig.providers[key];
                     const isHidden = currentConfig.active_provider !== key;
                     
@@ -1160,6 +1182,11 @@
                         baseURLLabel = "Location (Region)";
                         baseURLPlaceholder = "us-central1";
                         showUpload = true;
+                    } else if (key === 'sumopod') {
+                        apiKeyLabel = "Sumopod API Key";
+                        apiKeyPlaceholder = "Masukkan API Key Sumopod...";
+                        showBaseURL = true;
+                        baseURLPlaceholder = "https://ai.sumopod.com/v1";
                     } else if (['openai', 'qwen', 'byteplus', 'deepseek'].includes(key)) {
                          showBaseURL = true;
                     }
@@ -1482,7 +1509,26 @@
         }
 
         // Provider Switching
+        function switchProviderMode(mode) {
+            if (!currentConfig.providers) currentConfig.providers = {};
+            if (mode === 'sumopod') {
+                if (!currentConfig.providers.sumopod) {
+                    currentConfig.providers.sumopod = { api_key: "", model: "", base_url: "https://ai.sumopod.com/v1" };
+                }
+                if (!currentConfig.providers.sumopod.base_url) {
+                    currentConfig.providers.sumopod.base_url = "https://ai.sumopod.com/v1";
+                }
+                currentConfig.active_provider = 'sumopod';
+            } else if (currentConfig.active_provider === 'sumopod') {
+                currentConfig.active_provider = currentConfig.previous_brain_provider || 'byteplus';
+            }
+            renderUI();
+        }
+
         function switchProvider(key) {
+            if (key !== 'sumopod') {
+                currentConfig.previous_brain_provider = key;
+            }
             currentConfig.active_provider = key;
             renderUI();
         }
