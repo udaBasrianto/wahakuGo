@@ -1545,6 +1545,13 @@
             return `$${numeric.toFixed(4)}`;
         }
 
+        function formatContextWindow(value) {
+            if (!value) return '-';
+            const numeric = Number(value);
+            if (!Number.isFinite(numeric)) return escapeHTML(value);
+            return numeric.toLocaleString('en-US');
+        }
+
         function renderSumopodModelDetails() {
             const container = document.getElementById('sumopod-model-details');
             if (!container) return;
@@ -1560,34 +1567,45 @@
             }
 
             container.innerHTML = `
-                <div class="overflow-hidden rounded-lg border border-gray-100">
-                    <div class="grid grid-cols-[1.7fr_.8fr_.8fr_1fr] gap-3 bg-gray-50 px-4 py-2 text-[11px] font-bold uppercase text-gray-500">
-                        <span>Model</span>
-                        <span>Status</span>
-                        <span>Context</span>
-                        <span>Harga</span>
-                    </div>
-                    <div class="divide-y divide-gray-100 bg-white">
-                        ${details.map(detail => {
-                            const id = detail.id || '';
-                            const selected = currentConfig.providers?.sumopod?.model === id;
-                            const status = detail.status || (detail.input_cost === '0' && detail.output_cost === '0' ? '100% Off' : '');
-                            return `
-                                <button type="button" onclick="selectSumopodModel('${encodeURIComponent(id)}')" class="grid w-full grid-cols-[1.7fr_.8fr_.8fr_1fr] gap-3 px-4 py-3 text-left text-sm transition ${selected ? 'bg-cyan-50' : 'hover:bg-gray-50'}">
-                                    <span class="min-w-0">
-                                        <span class="block truncate font-semibold text-gray-800">${escapeHTML(id)}</span>
-                                        ${detail.provider ? `<span class="mt-1 inline-flex rounded-full bg-blue-50 px-2 py-0.5 text-[11px] font-medium text-blue-700">${escapeHTML(detail.provider)}</span>` : ''}
-                                    </span>
-                                    <span>${status ? `<span class="inline-flex rounded-full bg-green-100 px-2 py-1 text-[11px] font-medium text-green-700">${escapeHTML(status)}</span>` : '<span class="text-gray-400">-</span>'}</span>
-                                    <span class="text-gray-700">${detail.context_window ? escapeHTML(detail.context_window) : '-'}</span>
-                                    <span class="text-xs text-gray-600">
-                                        <span class="block">${formatModelCost(detail.input_cost) || '-'}</span>
-                                        <span class="block">${formatModelCost(detail.output_cost) || '-'}</span>
-                                    </span>
-                                </button>
-                            `;
-                        }).join('')}
-                    </div>
+                <div class="overflow-x-auto rounded-lg border border-gray-200 bg-white">
+                    <table class="w-full min-w-[760px] text-sm">
+                        <thead class="bg-gray-50 text-[11px] uppercase tracking-wide text-gray-500">
+                            <tr>
+                                <th class="px-5 py-3 text-left font-bold">Model</th>
+                                <th class="px-5 py-3 text-left font-bold">Provider</th>
+                                <th class="px-5 py-3 text-left font-bold">Context</th>
+                                <th class="px-5 py-3 text-left font-bold">Input</th>
+                                <th class="px-5 py-3 text-left font-bold">Output</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-gray-100">
+                            ${details.map(detail => {
+                                const id = detail.id || '';
+                                const selected = currentConfig.providers?.sumopod?.model === id;
+                                const status = detail.status || (detail.input_cost === '0' && detail.output_cost === '0' ? '100% Off' : '');
+                                return `
+                                    <tr onclick="selectSumopodModel('${encodeURIComponent(id)}')" class="cursor-pointer transition ${selected ? 'bg-cyan-50' : 'hover:bg-gray-50'}">
+                                        <td class="px-5 py-4">
+                                            <div class="flex flex-wrap items-center gap-2">
+                                                <span class="font-semibold text-gray-900">${escapeHTML(id)}</span>
+                                                ${status ? `<span class="inline-flex rounded-full bg-green-100 px-2.5 py-1 text-xs font-medium text-green-700">${escapeHTML(status)}</span>` : ''}
+                                            </div>
+                                        </td>
+                                        <td class="px-5 py-4">
+                                            ${detail.provider ? `<span class="inline-flex rounded-full bg-blue-100 px-2.5 py-1 text-xs font-medium text-blue-700">${escapeHTML(detail.provider)}</span>` : '<span class="text-gray-400">-</span>'}
+                                        </td>
+                                        <td class="px-5 py-4 font-medium text-gray-800">${formatContextWindow(detail.context_window)}</td>
+                                        <td class="px-5 py-4 text-gray-700">
+                                            <span class="font-semibold text-green-600">${formatModelCost(detail.input_cost) || '-'}</span>
+                                        </td>
+                                        <td class="px-5 py-4 text-gray-700">
+                                            <span class="font-semibold text-green-600">${formatModelCost(detail.output_cost) || '-'}</span>
+                                        </td>
+                                    </tr>
+                                `;
+                            }).join('')}
+                        </tbody>
+                    </table>
                 </div>
             `;
         }
