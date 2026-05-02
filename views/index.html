@@ -1958,7 +1958,7 @@
             input.value = '';
             
             // Show Loading
-            const loadingId = appendChatMessage('bot', '<i class="fas fa-spinner fa-spin"></i> Sedang mengetik...');
+            const loadingId = appendChatMessage('bot', 'Sedang mengetik...');
 
             try {
                 const res = await fetchAuth('/api/test-ai', {
