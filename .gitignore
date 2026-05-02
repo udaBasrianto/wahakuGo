@@ -9,6 +9,10 @@
 *.db
 *.db-shm
 *.db-wal
+
+# Config files with secrets
+config.json
+*.db-wal
 wahaku.db
 
 # Logs
