@@ -150,6 +150,13 @@ type FollowupTask struct {
 	Instruction   string    `json:"instruction"`
 	Status        string    `json:"status"`
 	CreatedAt     time.Time `json:"created_at"`
+	// Recurring configuration
+	RepeatType    string    `json:"repeat_type"`     // "none", "daily", "weekly", "monthly"
+	RepeatInterval int       `json:"repeat_interval"` // Every N days/weeks/months
+	RepeatTimes   int       `json:"repeat_times"`    // Total times to repeat (including first), 0 = infinite
+	RepeatDone    int       `json:"repeat_done"`     // How many times executed
+	RepeatUntil   time.Time `json:"repeat_until"`    // Optional end date (overrides RepeatTimes)
+	LastRun       time.Time `json:"last_run"`        // Last execution time
 }
 
 // ========== PASSWORD UTILITIES ==========
@@ -455,6 +462,12 @@ func main() {
 		instruction TEXT,
 		status TEXT DEFAULT 'pending',
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		repeat_type TEXT DEFAULT 'none',
+		repeat_interval INTEGER DEFAULT 1,
+		repeat_times INTEGER DEFAULT 0,
+		repeat_done INTEGER DEFAULT 0,
+		repeat_until DATETIME,
+		last_run DATETIME,
 		FOREIGN KEY(tenant_id) REFERENCES tenants(id),
 		FOREIGN KEY(user_id) REFERENCES users(id)
 	);
@@ -521,10 +534,7 @@ func main() {
 				log.Println("Migration Insert Error:", err)
 			}
 		}
-		// Note: We don't drop column in SQLite easily, so we just ignore it
-	}
-
-	// Create default tenant if not exists
+		['', {'log.Println(': 'igrating DB: Adding repeat columns to followup_tasks table...', 'none': 'authDB.Exec(', ')\n\t\tauthDB.Exec("ALTER TABLE followup_tasks ADD COLUMN repeat_times INTEGER DEFAULT 0")\n\t\tauthDB.Exec("ALTER TABLE followup_tasks ADD COLUMN repeat_done INTEGER DEFAULT 0")\n\t\tauthDB.Exec("ALTER TABLE followup_tasks ADD COLUMN repeat_until DATETIME': ''}]
 	var tenantCount int
 	authDB.QueryRow("SELECT COUNT(*) FROM tenants").Scan(&tenantCount)
 	if tenantCount == 0 {
