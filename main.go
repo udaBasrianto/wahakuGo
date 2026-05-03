@@ -184,7 +184,14 @@ func migrateUserPassword(userID int, plaintextPassword string) {
 		log.Println("Failed to migrate password for user", userID, ":", err)
 		return
 	}
-	_, err = authDB.Exec("UPDATE users SET password = ? WHERE id = ?", hashed, userID)
+	// Get tenant_id for this user to ensure scoped update
+	var tenantID int
+	err = authDB.QueryRow("SELECT tenant_id FROM users WHERE id = ?", userID).Scan(&tenantID)
+	if err != nil {
+		log.Println("Failed to get tenant for user", userID, ":", err)
+		return
+	}
+	_, err = authDB.Exec("UPDATE users SET password = ? WHERE id = ? AND tenant_id = ?", hashed, userID, tenantID)
 	if err != nil {
 		log.Println("Failed to update password during migration for user", userID, ":", err)
 	} else {
@@ -264,7 +271,19 @@ func requireAdmin(c *fiber.Ctx) error {
 
 // Tenant identification middleware
 func tenantMiddleware(c *fiber.Ctx) error {
-	// Get tenant ID from header (X-Tenant-ID)
+	// 1. Check if user is logged in (session exists)
+	sess, err := sessionStore.Get(c)
+	if err == nil {
+		if authenticated := sess.Get("authenticated"); authenticated == true {
+			// Use tenantID from session for authenticated users
+			if tenantID := sess.Get("tenantID"); tenantID != nil {
+				c.Locals("tenantID", tenantID)
+				return c.Next()
+			}
+		}
+	}
+
+	// 2. For unauthenticated requests (public endpoints), use header
 	tenantIDStr := c.Get("X-Tenant-ID")
 	if tenantIDStr == "" {
 		// Default to tenant ID 1 if not specified
@@ -280,7 +299,7 @@ func tenantMiddleware(c *fiber.Ctx) error {
 
 	// Verify tenant exists
 	var exists bool
-	err := authDB.QueryRow("SELECT EXISTS(SELECT 1 FROM tenants WHERE id = ?)", tenantID).Scan(&exists)
+	err = authDB.QueryRow("SELECT EXISTS(SELECT 1 FROM tenants WHERE id = ?)", tenantID).Scan(&exists)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Database error"})
 	}
@@ -513,9 +532,13 @@ func main() {
 		log.Println("Created default tenant")
 	}
 
-	// Create Admin if not exists
+	// Get default tenant ID
+	var defaultTenantID int
+	authDB.QueryRow("SELECT id FROM tenants WHERE name = ?", "default").Scan(&defaultTenantID)
+
+	// Create Admin if not exists in default tenant
 	var count int
-	authDB.QueryRow("SELECT COUNT(*) FROM users WHERE username = ?", cfg.AdminUsername).Scan(&count)
+	authDB.QueryRow("SELECT COUNT(*) FROM users WHERE username = ? AND tenant_id = ?", cfg.AdminUsername, defaultTenantID).Scan(&count)
 	if count == 0 {
 		adminPassword := cfg.AdminPassword
 		if adminPassword == "" {
@@ -528,10 +551,8 @@ func main() {
 					log.Println("Failed to hash initial admin password:", hashErr)
 				}
 			}
-			// Get default tenant ID
-			var tenantID int
-			authDB.QueryRow("SELECT id FROM tenants WHERE name = ?", "default").Scan(&tenantID)
-			authDB.Exec("INSERT INTO users (username, password, tenant_id, is_admin, is_active) VALUES (?, ?, ?, 1, 1)", cfg.AdminUsername, adminPassword, tenantID)
+			// Use default tenant ID already fetched above
+			authDB.Exec("INSERT INTO users (username, password, tenant_id, is_admin, is_active) VALUES (?, ?, ?, 1, 1)", cfg.AdminUsername, adminPassword, defaultTenantID)
 		}
 	}
 
@@ -1321,8 +1342,9 @@ func main() {
 			if cli != nil {
 				cli.Logout(context.Background())
 				cli.Disconnect()
-				// Remove association in DB
-				authDB.Exec("UPDATE users SET device_jid = '' WHERE id = ?", userID)
+	// Remove association in DB
+	tenantID := c.Locals("tenantID").(int)
+	authDB.Exec("UPDATE users SET device_jid = '' WHERE id = ? AND tenant_id = ?", userID, tenantID)
 				// Remove from memory
 				clientMutex.Lock()
 				delete(userClients, userID)
@@ -2627,7 +2649,7 @@ func processFollowups() {
 				remoteJID, _ := types.ParseJID(t.JID)
 				cli.SendMessage(context.Background(), remoteJID, &waE2E.Message{Conversation: &reply})
 
-				authDB.Exec("UPDATE followup_tasks SET status = 'completed' WHERE id = ?", t.ID)
+				authDB.Exec("UPDATE followup_tasks SET status = 'completed' WHERE id = ? AND tenant_id = ?", t.ID, t.TenantID)
 			} else {
 				log.Println("User client not connected for task:", t.ID)
 				// Retry later? Or mark failed?
