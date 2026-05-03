@@ -807,32 +807,29 @@ func main() {
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to save session"})
 		}
 
-		// Send OTP via WhatsApp
-		targetJID := types.NewJID(user.Username, types.DefaultUserServer)
-
-		if sysClient.Store.ID != nil && targetJID.User == sysClient.Store.ID.User {
-			targetJID = *sysClient.Store.ID
-			targetJID.Device = 0
-		}
-
-		msg := &waE2E.Message{
-			Conversation: proto.String("🔐 Kode Login Wahaku Dashboard: *" + otp + "*\n\nJangan berikan kode ini kepada siapapun."),
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		resp, err := sysClient.SendMessage(ctx, targetJID, msg)
-		if err != nil {
-			log.Println("Failed to send OTP (Timeout/Error):", err)
-			if user.Password != "" {
-				log.Printf("[LOGIN WARN] Failed to send OTP, skipping for password-authenticated user: %s", user.Username)
-				return finalizeLogin()
+		// Send OTP asynchronously (non-blocking)
+		go func() {
+			targetJID := types.NewJID(user.Username, types.DefaultUserServer)
+			if sysClient.Store.ID != nil && targetJID.User == sysClient.Store.ID.User {
+				targetJID = *sysClient.Store.ID
+				targetJID.Device = 0
 			}
-			return c.JSON(fiber.Map{"success": false, "message": "Gagal kirim OTP (Timeout). Pastikan bot terhubung."})
-		}
 
-		log.Printf("OTP Sent to %s (ID: %s, Length: %d)", targetJID.User, resp.ID, len(otp))
+			msg := &waE2E.Message{
+				Conversation: proto.String("🔐 Kode Login Wahaku Dashboard: *" + otp + "*\n\nJangan berikan kode ini kepada siapapun."),
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+
+			_, err := sysClient.SendMessage(ctx, targetJID, msg)
+			if err != nil {
+				log.Printf("Failed to send async OTP to %s: %v", user.Username, err)
+			} else {
+				log.Printf("OTP sent async to %s", user.Username)
+			}
+		}()
+
 		return c.JSON(fiber.Map{"success": true, "require_otp": true, "message": "OTP dikirim ke WhatsApp"})
 	})
 
@@ -951,27 +948,29 @@ func main() {
 		sess.Set("otp_expiry", time.Now().Add(5*time.Minute).Unix())
 		sess.Save()
 
-		// Send OTP via WhatsApp
-		targetJID := types.NewJID(user.Username, types.DefaultUserServer)
-		if sysClient.Store.ID != nil && targetJID.User == sysClient.Store.ID.User {
-			targetJID = *sysClient.Store.ID
-			targetJID.Device = 0
-		}
+		// Send OTP asynchronously (non-blocking)
+		go func() {
+			targetJID := types.NewJID(user.Username, types.DefaultUserServer)
+			if sysClient.Store.ID != nil && targetJID.User == sysClient.Store.ID.User {
+				targetJID = *sysClient.Store.ID
+				targetJID.Device = 0
+			}
 
-		msg := &waE2E.Message{
-			Conversation: proto.String("🔐 Kode Verifikasi (Ulang): *" + otp + "*\n\nMasukkan kode ini untuk menyelesaikan verifikasi."),
-		}
+			msg := &waE2E.Message{
+				Conversation: proto.String("🔐 Kode Verifikasi (Ulang): *" + otp + "*\n\nMasukkan kode ini untuk menyelesaikan verifikasi."),
+			}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
 
-		resp, err := sysClient.SendMessage(ctx, targetJID, msg)
-		if err != nil {
-			log.Println("Failed to send resend OTP:", err)
-			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Gagal kirim OTP"})
-		}
+			_, err := sysClient.SendMessage(ctx, targetJID, msg)
+			if err != nil {
+				log.Printf("Failed to send resend OTP to %s: %v", user.Username, err)
+			} else {
+				log.Printf("OTP resent to %s", user.Username)
+			}
+		}()
 
-		log.Printf("OTP Resent to %s: ID=%s", targetJID.User, resp.ID)
 		return c.JSON(fiber.Map{"success": true, "message": "Kode OTP baru telah dikirim"})
 	})
 
@@ -1063,27 +1062,28 @@ func main() {
 		sess.Set("tenantID", tenantID)
 		sess.Save()
 
-		targetJID := types.NewJID(req.Username, types.DefaultUserServer)
+		// Send OTP asynchronously (non-blocking)
+		go func() {
+			targetJID := types.NewJID(req.Username, types.DefaultUserServer)
+			if sysClient.Store.ID != nil && targetJID.User == sysClient.Store.ID.User {
+				targetJID = *sysClient.Store.ID
+				targetJID.Device = 0
+			}
 
-		if sysClient.Store.ID != nil && targetJID.User == sysClient.Store.ID.User {
-			targetJID = *sysClient.Store.ID
-			targetJID.Device = 0
-		}
+			msg := &waE2E.Message{
+				Conversation: proto.String("🔐 Kode Verifikasi Pendaftaran Wahaku: *" + otp + "*\n\nMasukkan kode ini untuk menyelesaikan pendaftaran."),
+			}
 
-		msg := &waE2E.Message{
-			Conversation: proto.String("🔐 Kode Verifikasi Pendaftaran Wahaku: *" + otp + "*\n\nMasukkan kode ini untuk menyelesaikan pendaftaran."),
-		}
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
 
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		resp, err := sysClient.SendMessage(ctx, targetJID, msg)
-		if err != nil {
-			log.Println("Failed to send OTP (Register):", err)
-			return c.JSON(fiber.Map{"success": true, "require_otp": true, "message": "Pendaftaran berhasil, tapi gagal kirim OTP. Silakan login ulang."})
-		}
-
-		log.Printf("Register OTP Sent to %s (ID: %s, Length: %d)", targetJID.User, resp.ID, len(otp))
+			_, err := sysClient.SendMessage(ctx, targetJID, msg)
+			if err != nil {
+				log.Printf("Failed to send OTP for registration to %s: %v", req.Username, err)
+			} else {
+				log.Printf("Registration OTP sent to %s", req.Username)
+			}
+		}()
 
 		return c.JSON(fiber.Map{"success": true, "require_otp": true, "message": "Pendaftaran berhasil. Masukkan kode OTP yang dikirim ke WhatsApp."})
 	})
