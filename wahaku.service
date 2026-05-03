@@ -1,0 +1,18 @@
+[Unit]
+Description=Wahaku WhatsApp Bot Service
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/www/wwwroot/chat.yaakhi.id
+ExecStart=/www/wwwroot/chat.yaakhi.id/wahaku
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+EnvironmentFile=/etc/systemd/system/wahaku.env
+
+[Install]
+WantedBy=multi-user.target
