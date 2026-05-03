@@ -115,6 +115,10 @@ var (
 	// Simple in-memory rate limiter for auth endpoints
 	authRateLimitMap = make(map[string][]time.Time)
 	authRateLimitMux sync.RWMutex
+
+	// Tenant-specific knowledge cache
+	tenantKnowledge   = make(map[int]string)
+	knowledgeMutex    sync.RWMutex
 )
 
 const redactedSecret = "__REDACTED__"
@@ -140,6 +144,7 @@ type UserDevice struct {
 type FollowupTask struct {
 	ID            int       `json:"id"`
 	UserID        int       `json:"user_id"`
+	TenantID      int       `json:"tenant_id"`
 	JID           string    `json:"jid"`
 	ScheduledTime time.Time `json:"scheduled_time"`
 	Instruction   string    `json:"instruction"`
@@ -257,6 +262,37 @@ func requireAdmin(c *fiber.Ctx) error {
 	return c.Status(403).JSON(fiber.Map{"success": false, "message": "Requires Admin privileges"})
 }
 
+// Tenant identification middleware
+func tenantMiddleware(c *fiber.Ctx) error {
+	// Get tenant ID from header (X-Tenant-ID)
+	tenantIDStr := c.Get("X-Tenant-ID")
+	if tenantIDStr == "" {
+		// Default to tenant ID 1 if not specified
+		c.Locals("tenantID", 1)
+		return c.Next()
+	}
+
+	// Parse tenant ID
+	var tenantID int
+	if _, err := fmt.Sscan(tenantIDStr, &tenantID); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid tenant ID"})
+	}
+
+	// Verify tenant exists
+	var exists bool
+	err := authDB.QueryRow("SELECT EXISTS(SELECT 1 FROM tenants WHERE id = ?)", tenantID).Scan(&exists)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Database error"})
+	}
+	if !exists {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Tenant not found"})
+	}
+
+	// Set tenant ID in context
+	c.Locals("tenantID", tenantID)
+	return c.Next()
+}
+
 func redactSecret(value string) string {
 	if value == "" {
 		return ""
@@ -365,32 +401,52 @@ func main() {
 	authDB = sharedDB
 
 	// Create Tables
-	_, err = authDB.Exec(`CREATE TABLE IF NOT EXISTS users (
+	_, err = authDB.Exec(`CREATE TABLE IF NOT EXISTS tenants (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT UNIQUE,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE TABLE IF NOT EXISTS users (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		tenant_id INTEGER NOT NULL DEFAULT 1,
 		username TEXT UNIQUE,
 		email TEXT,
 		password TEXT,
 		is_admin BOOLEAN DEFAULT 0,
-		is_active BOOLEAN DEFAULT 0
+		is_active BOOLEAN DEFAULT 0,
+		FOREIGN KEY(tenant_id) REFERENCES tenants(id)
 	);
 	CREATE TABLE IF NOT EXISTS user_devices (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		tenant_id INTEGER NOT NULL DEFAULT 1,
 		user_id INTEGER,
 		device_jid TEXT,
 		alias TEXT,
 		status TEXT,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY(tenant_id) REFERENCES tenants(id),
 		FOREIGN KEY(user_id) REFERENCES users(id)
 	);
 	CREATE TABLE IF NOT EXISTS followup_tasks (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		tenant_id INTEGER NOT NULL DEFAULT 1,
 		user_id INTEGER,
 		jid TEXT,
 		scheduled_time DATETIME,
 		instruction TEXT,
 		status TEXT DEFAULT 'pending',
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY(tenant_id) REFERENCES tenants(id),
 		FOREIGN KEY(user_id) REFERENCES users(id)
+	);
+	CREATE TABLE IF NOT EXISTS tenant_knowledge_files (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		tenant_id INTEGER NOT NULL,
+		filename TEXT NOT NULL,
+		original_name TEXT,
+		uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY(tenant_id) REFERENCES tenants(id),
+		UNIQUE(tenant_id, filename)
 	);`)
 	if err != nil {
 		log.Fatal("Failed to create tables:", err)
@@ -424,7 +480,10 @@ func main() {
 		}
 		var dataToMigrate []migrationData
 
-		rows, err := authDB.Query("SELECT id, device_jid FROM users WHERE device_jid IS NOT NULL AND device_jid != ''")
+		// Get tenant ID from context (not available during migration, using default)
+		var tenantID int = 1 // Default tenant ID
+
+		rows, err := authDB.Query("SELECT id, device_jid FROM users WHERE device_jid IS NOT NULL AND device_jid != '' AND tenant_id = ?", tenantID)
 		if err == nil && rows != nil {
 			for rows.Next() {
 				var uid int
@@ -438,12 +497,20 @@ func main() {
 
 		// Insert to new table
 		for _, d := range dataToMigrate {
-			_, err := authDB.Exec("INSERT INTO user_devices (user_id, device_jid, alias, status) VALUES (?, ?, 'Main Device', 'CONNECTED')", d.UserID, d.JID)
+			_, err := authDB.Exec("INSERT INTO user_devices (tenant_id, user_id, device_jid, alias, status) VALUES (?, ?, ?, 'Main Device', 'CONNECTED')", tenantID, d.UserID, d.JID)
 			if err != nil {
 				log.Println("Migration Insert Error:", err)
 			}
 		}
 		// Note: We don't drop column in SQLite easily, so we just ignore it
+	}
+
+	// Create default tenant if not exists
+	var tenantCount int
+	authDB.QueryRow("SELECT COUNT(*) FROM tenants").Scan(&tenantCount)
+	if tenantCount == 0 {
+		authDB.Exec("INSERT INTO tenants (name) VALUES (?)", "default")
+		log.Println("Created default tenant")
 	}
 
 	// Create Admin if not exists
@@ -461,7 +528,10 @@ func main() {
 					log.Println("Failed to hash initial admin password:", hashErr)
 				}
 			}
-			authDB.Exec("INSERT INTO users (username, password, is_admin, is_active) VALUES (?, ?, 1, 1)", cfg.AdminUsername, adminPassword)
+			// Get default tenant ID
+			var tenantID int
+			authDB.QueryRow("SELECT id FROM tenants WHERE name = ?", "default").Scan(&tenantID)
+			authDB.Exec("INSERT INTO users (username, password, tenant_id, is_admin, is_active) VALUES (?, ?, ?, 1, 1)", cfg.AdminUsername, adminPassword, tenantID)
 		}
 	}
 
@@ -472,6 +542,9 @@ func main() {
 
 	// Start Follow-up Scheduler
 	go processFollowups()
+
+	// Load knowledge base for all tenants
+	go refreshKnowledge()
 
 	// 5. Setup Fiber
 	sessionStore = session.New(session.Config{
@@ -512,6 +585,7 @@ func main() {
 		},
 	})
 	app.Use(csrfMiddleware)
+	app.Use(tenantMiddleware)
 
 	// Middleware Auth
 	app.Use(func(c *fiber.Ctx) error {
@@ -547,6 +621,11 @@ func main() {
 		}
 		if isAdmin := sess.Get("isAdmin"); isAdmin != nil {
 			c.Locals("isAdmin", isAdmin)
+		}
+		// Set tenantID from context (set by tenantMiddleware)
+		if tenantID := c.Locals("tenantID"); tenantID != nil {
+			sess.Set("tenantID", tenantID)
+			c.Locals("tenantID", tenantID)
 		}
 
 		return c.Next()
@@ -590,12 +669,22 @@ func main() {
 		// Determine if login is by Email or Username (Phone)
 		isEmailLogin := strings.Contains(req.Username, "@")
 
-		query := "SELECT id, username, COALESCE(email, ''), COALESCE(password, ''), COALESCE(is_admin, 0), COALESCE(is_active, 0) FROM users WHERE username = ?"
-		if isEmailLogin {
-			query = "SELECT id, username, COALESCE(email, ''), COALESCE(password, ''), COALESCE(is_admin, 0), COALESCE(is_active, 0) FROM users WHERE email = ?"
+		// Get tenant ID from context (set by tenantMiddleware)
+		tenantIDVal := c.Locals("tenantID")
+		var tenantID int
+		if tenantIDVal != nil {
+			tenantID = tenantIDVal.(int)
+		} else {
+			// Default to tenant 1 if not set (should not happen due to middleware)
+			tenantID = 1
 		}
 
-		err = authDB.QueryRow(query, req.Username).Scan(&user.ID, &user.Username, &user.Email, &user.Password, &user.IsAdmin, &user.IsActive)
+		query := "SELECT id, username, COALESCE(email, ''), COALESCE(password, ''), COALESCE(is_admin, 0), COALESCE(is_active, 0) FROM users WHERE username = ? AND tenant_id = ?"
+		if isEmailLogin {
+			query = "SELECT id, username, COALESCE(email, ''), COALESCE(password, ''), COALESCE(is_admin, 0), COALESCE(is_active, 0) FROM users WHERE email = ? AND tenant_id = ?"
+		}
+
+		err = authDB.QueryRow(query, req.Username, tenantID).Scan(&user.ID, &user.Username, &user.Email, &user.Password, &user.IsAdmin, &user.IsActive)
 
 		log.Printf("[LOGIN DEBUG] User: %s, ID: %d, Active: %v, Admin: %v, Err: %v", req.Username, user.ID, user.IsActive, user.IsAdmin, err)
 
@@ -649,6 +738,9 @@ func main() {
 				sess.Set("authenticated", true)
 				sess.Set("userID", user.ID)
 				sess.Set("isAdmin", user.IsAdmin)
+				// Set tenantID from context
+				tenantID := c.Locals("tenantID").(int)
+				sess.Set("tenantID", tenantID)
 				sess.Save()
 				return c.JSON(fiber.Map{"success": true, "message": "Login Berhasil (OTP Skipped)"})
 			}
@@ -656,7 +748,7 @@ func main() {
 		}
 
 		// GET SYSTEM BOT (Admin Bot) to send OTP
-		sysClient := getSystemBot()
+		sysClient := getSystemBot(tenantID)
 
 		// Check if System Bot is connected
 		if sysClient == nil || !sysClient.IsConnected() {
@@ -689,6 +781,7 @@ func main() {
 		sess.Set("temp_auth", true)
 		sess.Set("pending_user_id", user.ID)
 		sess.Set("pending_is_admin", user.IsAdmin)
+		sess.Set("tenantID", tenantID)
 		if err := sess.Save(); err != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to save session"})
 		}
@@ -754,10 +847,18 @@ func main() {
 		if req.OTP == storedOTP.(string) {
 			userID := sess.Get("pending_user_id").(int)
 			isAdmin := sess.Get("pending_is_admin").(bool)
+			tenantID := sess.Get("tenantID")
+			var tenantIDInt int
+			if tenantID != nil {
+				tenantIDInt = tenantID.(int)
+			} else {
+				// Default to tenant 1 if not set (should not happen)
+				tenantIDInt = 1
+			}
 
 			log.Printf("[OTP SUCCESS] UserID: %d. Activating user...", userID)
 
-			_, err := authDB.Exec("UPDATE users SET is_active = 1 WHERE id = ?", userID)
+			_, err := authDB.Exec("UPDATE users SET is_active = 1 WHERE id = ? AND tenant_id = ?", userID, tenantIDInt)
 			if err != nil {
 				log.Println("Failed to activate user:", err)
 			}
@@ -765,6 +866,7 @@ func main() {
 			sess.Set("authenticated", true)
 			sess.Set("userID", userID)
 			sess.Set("isAdmin", isAdmin)
+			sess.Set("tenantID", tenantIDInt)
 			sess.Delete("otp")
 			sess.Delete("otp_expiry")
 			sess.Delete("temp_auth")
@@ -792,16 +894,26 @@ func main() {
 
 		userID := pendingUserID.(int)
 
+		// Get tenant ID from session
+		tenantIDVal := sess.Get("tenantID")
+		var tenantID int
+		if tenantIDVal != nil {
+			tenantID = tenantIDVal.(int)
+		} else {
+			// Default to tenant 1 if not set (should not happen)
+			tenantID = 1
+		}
+
 		// Fetch user from database
 		var user User
-		err = authDB.QueryRow("SELECT id, username, COALESCE(email, ''), COALESCE(password, ''), COALESCE(is_admin, 0), COALESCE(is_active, 0) FROM users WHERE id = ?", userID).
+		err = authDB.QueryRow("SELECT id, username, COALESCE(email, ''), COALESCE(password, ''), COALESCE(is_admin, 0), COALESCE(is_active, 0) FROM users WHERE id = ? AND tenant_id = ?", userID, tenantID).
 			Scan(&user.ID, &user.Username, &user.Email, &user.Password, &user.IsAdmin, &user.IsActive)
 		if err != nil {
 			return c.Status(404).JSON(fiber.Map{"success": false, "message": "User tidak ditemukan"})
 		}
 
 		// Check if system bot is available
-		sysClient := getSystemBot()
+		sysClient := getSystemBot(tenantID)
 		if sysClient == nil || !sysClient.IsConnected() {
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Sistem Bot belum terhubung, tidak bisa kirim OTP"})
 		}
@@ -856,8 +968,17 @@ func main() {
 			if !strings.Contains(req.Email, "@") {
 				return c.Status(400).JSON(fiber.Map{"success": false, "message": "Format Email tidak valid"})
 			}
+			// Get tenant ID from context (set by tenantMiddleware)
+			tenantIDVal := c.Locals("tenantID")
+			var tenantID int
+			if tenantIDVal != nil {
+				tenantID = tenantIDVal.(int)
+			} else {
+				// Default to tenant 1 if not set (should not happen due to middleware)
+				tenantID = 1
+			}
 			var count int
-			authDB.QueryRow("SELECT COUNT(*) FROM users WHERE email = ?", req.Email).Scan(&count)
+			authDB.QueryRow("SELECT COUNT(*) FROM users WHERE email = ? AND tenant_id = ?", req.Email, tenantID).Scan(&count)
 			if count > 0 {
 				return c.Status(400).JSON(fiber.Map{"success": false, "message": "Email sudah terdaftar"})
 			}
@@ -877,13 +998,23 @@ func main() {
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Gagal memproses password"})
 		}
 
-		_, err = authDB.Exec("INSERT INTO users (username, email, password, is_admin, is_active) VALUES (?, ?, ?, 0, 0)", req.Username, req.Email, hashedPassword)
+		// Get tenant ID from context (set by tenantMiddleware)
+		tenantIDVal := c.Locals("tenantID")
+		var tenantID int
+		if tenantIDVal != nil {
+			tenantID = tenantIDVal.(int)
+		} else {
+			// Default to tenant 1 if not set (should not happen due to middleware)
+			tenantID = 1
+		}
+
+		_, err = authDB.Exec("INSERT INTO users (username, email, password, tenant_id, is_admin, is_active) VALUES (?, ?, ?, ?, 0, 0)", req.Username, req.Email, hashedPassword, tenantID)
 		if err != nil {
 			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Nomor WhatsApp atau Email sudah terdaftar"})
 		}
 
 		// SEND OTP
-		sysClient := getSystemBot()
+		sysClient := getSystemBot(tenantID)
 		if sysClient == nil || !sysClient.IsConnected() {
 			return c.JSON(fiber.Map{"success": true, "require_otp": false, "message": "Pendaftaran berhasil. Bot belum terhubung, tidak bisa kirim OTP."})
 		}
@@ -894,8 +1025,9 @@ func main() {
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Gagal generate OTP"})
 		}
 
+		// Get user ID for OTP session
 		var userID int
-		authDB.QueryRow("SELECT id FROM users WHERE username = ?", req.Username).Scan(&userID)
+		authDB.QueryRow("SELECT id FROM users WHERE username = ? AND tenant_id = ?", req.Username, tenantID).Scan(&userID)
 
 		sess, err := sessionStore.Get(c)
 		if err != nil {
@@ -907,6 +1039,7 @@ func main() {
 		sess.Set("temp_auth", true)
 		sess.Set("pending_user_id", userID)
 		sess.Set("pending_is_admin", false)
+		sess.Set("tenantID", tenantID)
 		sess.Save()
 
 		targetJID := types.NewJID(req.Username, types.DefaultUserServer)
@@ -986,7 +1119,27 @@ func main() {
 	})
 
 	api.Get("/config", requireAdmin, func(c *fiber.Ctx) error {
-		return c.JSON(redactedConfig(cfg))
+		// Get tenant-specific knowledge files
+		tenantID := c.Locals("tenantID").(int)
+		config := redactedConfig(cfg)
+
+		// Query knowledge files for this tenant
+		rows, err := authDB.Query("SELECT filename FROM tenant_knowledge_files WHERE tenant_id = ?", tenantID)
+		if err != nil {
+			log.Println("Error querying knowledge files:", err)
+		} else {
+			defer rows.Close()
+			var files []string
+			for rows.Next() {
+				var filename string
+				if err := rows.Scan(&filename); err == nil {
+					files = append(files, filename)
+				}
+			}
+			config.KnowledgeFiles = files
+		}
+
+		return c.JSON(config)
 	})
 
 	api.Post("/config", requireAdmin, func(c *fiber.Ctx) error {
@@ -1006,6 +1159,7 @@ func main() {
 	// Follow-up Routes (unchanged)
 	api.Post("/followup", func(c *fiber.Ctx) error {
 		userID := c.Locals("userID").(int)
+		tenantID := c.Locals("tenantID").(int)
 		var req struct {
 			JID          string `json:"jid"`
 			DelayMinutes int    `json:"delay_minutes"`
@@ -1016,8 +1170,8 @@ func main() {
 		}
 
 		scheduledTime := time.Now().Add(time.Duration(req.DelayMinutes) * time.Minute)
-		_, err := authDB.Exec("INSERT INTO followup_tasks (user_id, jid, scheduled_time, instruction, status) VALUES (?, ?, ?, ?, 'pending')",
-			userID, req.JID, scheduledTime, req.Instruction)
+		_, err := authDB.Exec("INSERT INTO followup_tasks (tenant_id, user_id, jid, scheduled_time, instruction, status) VALUES (?, ?, ?, ?, ?, 'pending')",
+			tenantID, userID, req.JID, scheduledTime, req.Instruction)
 
 		if err != nil {
 			log.Println("Error creating followup:", err)
@@ -1029,7 +1183,8 @@ func main() {
 
 	api.Get("/followup", func(c *fiber.Ctx) error {
 		userID := c.Locals("userID").(int)
-		rows, err := authDB.Query("SELECT id, jid, scheduled_time, instruction, status FROM followup_tasks WHERE user_id = ? AND status = 'pending' ORDER BY scheduled_time ASC", userID)
+		tenantID := c.Locals("tenantID").(int)
+		rows, err := authDB.Query("SELECT id, jid, scheduled_time, instruction, status FROM followup_tasks WHERE user_id = ? AND tenant_id = ? AND status = 'pending' ORDER BY scheduled_time ASC", userID, tenantID)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": "Database error"})
 		}
@@ -1047,9 +1202,10 @@ func main() {
 
 	api.Delete("/followup/:id", func(c *fiber.Ctx) error {
 		userID := c.Locals("userID").(int)
+		tenantID := c.Locals("tenantID").(int)
 		id := c.Params("id")
 
-		res, err := authDB.Exec("DELETE FROM followup_tasks WHERE id = ? AND user_id = ?", id, userID)
+		res, err := authDB.Exec("DELETE FROM followup_tasks WHERE id = ? AND user_id = ? AND tenant_id = ?", id, userID, tenantID)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": "Database error"})
 		}
@@ -1085,6 +1241,9 @@ func main() {
 			return c.Status(400).JSON(fiber.Map{"error": "Tipe file tidak diizinkan. Hanya PDF, TXT, MD, DOC, DOCX"})
 		}
 
+		// Get tenant ID
+		tenantID := c.Locals("tenantID").(int)
+
 		// Sanitize filename: generate server-side name to avoid path traversal and collisions.
 		suffix, err := crand.Int(crand.Reader, big.NewInt(1000000))
 		if err != nil {
@@ -1097,18 +1256,19 @@ func main() {
 			return c.Status(500).JSON(fiber.Map{"error": "Failed to save file"})
 		}
 
-		exists := false
-		for _, f := range cfg.KnowledgeFiles {
-			if f == safeFilename {
-				exists = true
-				break
-			}
+		// Insert into tenant_knowledge_files
+		_, err = authDB.Exec("INSERT INTO tenant_knowledge_files (tenant_id, filename, original_name) VALUES (?, ?, ?)",
+			tenantID, safeFilename, file.Filename)
+		if err != nil {
+			// Remove the saved file if DB insert fails
+			os.Remove(path)
+			log.Println("Error inserting tenant knowledge file:", err)
+			return c.Status(500).JSON(fiber.Map{"error": "Failed to register file"})
 		}
-		if !exists {
-			cfg.KnowledgeFiles = append(cfg.KnowledgeFiles, safeFilename)
-			saveConfig()
-			go refreshKnowledge()
-		}
+
+		// Rebuild knowledge for this tenant
+		go rebuildTenantKnowledge(tenantID)
+
 		return c.JSON(fiber.Map{"success": true, "filename": safeFilename, "original_filename": file.Filename})
 	})
 
@@ -1120,22 +1280,28 @@ func main() {
 			return c.Status(400).JSON(fiber.Map{"error": "Invalid JSON"})
 		}
 		filename := filepath.Base(req.Filename)
-		newFiles := []string{}
-		found := false
-		for _, f := range cfg.KnowledgeFiles {
-			if f != filename {
-				newFiles = append(newFiles, f)
-			} else {
-				found = true
-			}
+		tenantID := c.Locals("tenantID").(int)
+
+		// Check if file belongs to this tenant
+		var count int
+		err := authDB.QueryRow("SELECT COUNT(*) FROM tenant_knowledge_files WHERE filename = ? AND tenant_id = ?", filename, tenantID).Scan(&count)
+		if err != nil {
+			log.Println("Error checking file ownership:", err)
+			return c.Status(500).JSON(fiber.Map{"error": "Database error"})
 		}
-		if !found {
+		if count == 0 {
 			return c.Status(404).JSON(fiber.Map{"success": false, "message": "File tidak ditemukan di daftar."})
 		}
-		cfg.KnowledgeFiles = newFiles
-		saveConfig()
+
+		// Delete from DB
+		authDB.Exec("DELETE FROM tenant_knowledge_files WHERE filename = ? AND tenant_id = ?", filename, tenantID)
+
+		// Delete file from disk
 		os.Remove("uploads/" + filename)
-		go refreshKnowledge()
+
+		// Rebuild knowledge for this tenant
+		go rebuildTenantKnowledge(tenantID)
+
 		return c.JSON(fiber.Map{"success": true})
 	})
 
@@ -1203,8 +1369,9 @@ func main() {
 	api.Get("/me", func(c *fiber.Ctx) error {
 		userID := c.Locals("userID").(int)
 		isAdmin := c.Locals("isAdmin").(bool)
+		tenantID := c.Locals("tenantID").(int)
 		var username string
-		authDB.QueryRow("SELECT username FROM users WHERE id = ?", userID).Scan(&username)
+		authDB.QueryRow("SELECT username FROM users WHERE id = ? AND tenant_id = ?", userID, tenantID).Scan(&username)
 
 		return c.JSON(fiber.Map{
 			"id":       userID,
@@ -1230,10 +1397,12 @@ func main() {
 			return c.Status(400).JSON(fiber.Map{"error": "Username cannot be empty"})
 		}
 		var count int
-		authDB.QueryRow("SELECT COUNT(*) FROM users WHERE username = ? AND id != ?", req.Username, userID).Scan(&count)
+		tenantID := c.Locals("tenantID").(int)
+		authDB.QueryRow("SELECT COUNT(*) FROM users WHERE username = ? AND id != ? AND tenant_id = ?", req.Username, userID, tenantID).Scan(&count)
 		if count > 0 {
 			return c.Status(400).JSON(fiber.Map{"error": "Username already taken"})
 		}
+
 		if req.Password != "" {
 			// Hash password before updating
 			hashedPassword, err := hashPassword(req.Password)
@@ -1241,9 +1410,9 @@ func main() {
 				log.Println("Failed to hash password during profile update:", err)
 				return c.Status(500).JSON(fiber.Map{"error": "Failed to process password"})
 			}
-			authDB.Exec("UPDATE users SET username = ?, password = ? WHERE id = ?", req.Username, hashedPassword, userID)
+			authDB.Exec("UPDATE users SET username = ?, password = ? WHERE id = ? AND tenant_id = ?", req.Username, hashedPassword, userID, tenantID)
 		} else {
-			authDB.Exec("UPDATE users SET username = ? WHERE id = ?", req.Username, userID)
+			authDB.Exec("UPDATE users SET username = ? WHERE id = ? AND tenant_id = ?", req.Username, userID, tenantID)
 		}
 		return c.JSON(fiber.Map{"success": true})
 	})
@@ -1255,7 +1424,16 @@ func main() {
 		userID := c.Locals("userID").(int)
 
 		// Get from DB
-		rows, err := authDB.Query("SELECT device_jid, alias, status, is_primary FROM user_devices WHERE user_id = ?", userID)
+		tenantIDVal := c.Locals("tenantID")
+		var tenantID int
+		if tenantIDVal != nil {
+			tenantID = tenantIDVal.(int)
+		} else {
+			// Default to tenant 1 if not set (should not happen due to middleware)
+			tenantID = 1
+		}
+
+		rows, err := authDB.Query("SELECT device_jid, alias, status, is_primary FROM user_devices WHERE user_id = ? AND tenant_id = ?", userID, tenantID)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": "Database error"})
 		}
@@ -1360,7 +1538,8 @@ func main() {
 		}
 		clientMutex.Unlock()
 
-		go startUserDevice(userID, "") // Empty string = New Device
+		tenantID := c.Locals("tenantID").(int)
+		go startUserDevice(userID, "", tenantID) // Empty string = New Device
 		return c.JSON(fiber.Map{"success": true, "message": "Initializing new device pairing..."})
 	})
 
@@ -1397,7 +1576,8 @@ func main() {
 		log.Printf("Deleting device from DB: UserID=%d, JID=%s", userID, jidStr)
 
 		// Remove from DB
-		authDB.Exec("DELETE FROM user_devices WHERE user_id = ? AND device_jid = ?", userID, jidStr)
+		tenantID := c.Locals("tenantID").(int)
+		authDB.Exec("DELETE FROM user_devices WHERE user_id = ? AND device_jid = ? AND tenant_id = ?", userID, jidStr, tenantID)
 
 		return c.JSON(fiber.Map{"success": true})
 	})
@@ -1405,6 +1585,7 @@ func main() {
 	// Set Primary Device
 	api.Post("/device/:jid/primary", func(c *fiber.Ctx) error {
 		userID := c.Locals("userID").(int)
+		tenantID := c.Locals("tenantID").(int)
 		rawJid := c.Params("jid")
 
 		jidStr, err := url.QueryUnescape(rawJid)
@@ -1413,13 +1594,13 @@ func main() {
 		}
 
 		// 1. Reset all for this user
-		_, err = authDB.Exec("UPDATE user_devices SET is_primary = 0 WHERE user_id = ?", userID)
+		_, err = authDB.Exec("UPDATE user_devices SET is_primary = 0 WHERE user_id = ? AND tenant_id = ?", userID, tenantID)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": err.Error()})
 		}
 
 		// 2. Set new primary
-		_, err = authDB.Exec("UPDATE user_devices SET is_primary = 1 WHERE user_id = ? AND device_jid = ?", userID, jidStr)
+		_, err = authDB.Exec("UPDATE user_devices SET is_primary = 1 WHERE user_id = ? AND device_jid = ? AND tenant_id = ?", userID, jidStr, tenantID)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": err.Error()})
 		}
@@ -1452,7 +1633,8 @@ func main() {
 		if prompt == "" {
 			prompt = req.Message
 		}
-		reply := callAI(prompt)
+		tenantID := c.Locals("tenantID").(int)
+		reply := callAI(tenantID, prompt)
 		return c.JSON(fiber.Map{"success": true, "reply": reply})
 	})
 
@@ -1531,7 +1713,8 @@ func main() {
 		if isAdmin, ok := c.Locals("isAdmin").(bool); !ok || !isAdmin {
 			return c.Status(403).JSON(fiber.Map{"error": "Requires Admin privileges"})
 		}
-		rows, err := authDB.Query("SELECT id, username, is_admin, is_active FROM users ORDER BY id DESC")
+		tenantID := c.Locals("tenantID").(int)
+		rows, err := authDB.Query("SELECT id, username, is_admin, is_active FROM users WHERE tenant_id = ? ORDER BY id DESC", tenantID)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": "Database error"})
 		}
@@ -1550,6 +1733,7 @@ func main() {
 		if isAdmin, ok := c.Locals("isAdmin").(bool); !ok || !isAdmin {
 			return c.Status(403).JSON(fiber.Map{"error": "Requires Admin privileges"})
 		}
+		tenantID := c.Locals("tenantID").(int)
 		var req User
 		if err := c.BodyParser(&req); err != nil {
 			return c.Status(400).JSON(fiber.Map{"error": "Invalid JSON"})
@@ -1562,8 +1746,8 @@ func main() {
 			log.Println("Failed to hash admin-created password:", err)
 			return c.Status(500).JSON(fiber.Map{"error": "Failed to process password"})
 		}
-		_, err = authDB.Exec("INSERT INTO users (username, password, is_admin, is_active) VALUES (?, ?, ?, ?)",
-			req.Username, hashedPassword, req.IsAdmin, req.IsActive)
+		_, err = authDB.Exec("INSERT INTO users (username, password, tenant_id, is_admin, is_active) VALUES (?, ?, ?, ?, ?)",
+			req.Username, hashedPassword, tenantID, req.IsAdmin, req.IsActive)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": "Username already exists or Database error"})
 		}
@@ -1575,6 +1759,7 @@ func main() {
 			return c.Status(403).JSON(fiber.Map{"error": "Requires Admin privileges"})
 		}
 		id := c.Params("id")
+		tenantID := c.Locals("tenantID").(int)
 		var req struct {
 			Username string `json:"username"`
 			Password string `json:"password"`
@@ -1590,11 +1775,11 @@ func main() {
 				log.Println("Failed to hash admin-updated password:", err)
 				return c.Status(500).JSON(fiber.Map{"error": "Failed to process password"})
 			}
-			authDB.Exec("UPDATE users SET username = ?, password = ?, is_admin = ?, is_active = ? WHERE id = ?",
-				req.Username, hashedPassword, req.IsAdmin, req.IsActive, id)
+			authDB.Exec("UPDATE users SET username = ?, password = ?, is_admin = ?, is_active = ? WHERE id = ? AND tenant_id = ?",
+				req.Username, hashedPassword, req.IsAdmin, req.IsActive, id, tenantID)
 		} else {
-			authDB.Exec("UPDATE users SET username = ?, is_admin = ?, is_active = ? WHERE id = ?",
-				req.Username, req.IsAdmin, req.IsActive, id)
+			authDB.Exec("UPDATE users SET username = ?, is_admin = ?, is_active = ? WHERE id = ? AND tenant_id = ?",
+				req.Username, req.IsAdmin, req.IsActive, id, tenantID)
 		}
 		return c.JSON(fiber.Map{"success": true})
 	})
@@ -1605,11 +1790,12 @@ func main() {
 		}
 		id := c.Params("id")
 		myID := c.Locals("userID").(int)
+		tenantID := c.Locals("tenantID").(int)
 		idInt, _ := strconv.Atoi(id)
 		if idInt == myID {
 			return c.Status(400).JSON(fiber.Map{"error": "Cannot delete yourself"})
 		}
-		authDB.Exec("DELETE FROM users WHERE id = ?", id)
+		authDB.Exec("DELETE FROM users WHERE id = ? AND tenant_id = ?", id, tenantID)
 		return c.JSON(fiber.Map{"success": true})
 	})
 
@@ -1632,29 +1818,44 @@ func main() {
 // --- MULTI USER LOGIC ---
 
 func initAdminClient() {
-	// Find Admin ID
-	var adminID int
-	err := authDB.QueryRow("SELECT id FROM users WHERE is_admin = 1 LIMIT 1").Scan(&adminID)
+	// Initialize admin clients for all tenants
+	rows, err := authDB.Query("SELECT id FROM tenants")
 	if err != nil {
-		log.Println("Admin not found for init")
+		log.Println("Error querying tenants:", err)
 		return
 	}
+	defer rows.Close()
 
-	log.Println("Initializing Admin Bot (ID:", adminID, ")")
-	startAllUserDevices(adminID)
+	for rows.Next() {
+		var tenantID int
+		if err := rows.Scan(&tenantID); err != nil {
+			continue
+		}
+
+		// Find Admin ID for this tenant
+		var adminID int
+		err := authDB.QueryRow("SELECT id FROM users WHERE is_admin = 1 AND tenant_id = ? LIMIT 1", tenantID).Scan(&adminID)
+		if err != nil {
+			log.Printf("Admin not found for tenant %d\n", tenantID)
+			continue
+		}
+
+		log.Printf("Initializing Admin Bot for Tenant %d (UserID: %d)\n", tenantID, adminID)
+		startAllUserDevices(adminID, tenantID)
+	}
 }
 
-func getSystemBot() *whatsmeow.Client {
+func getSystemBot(tenantID int) *whatsmeow.Client {
 	// Return Admin's client for OTP sending
 	var adminID int
-	err := authDB.QueryRow("SELECT id FROM users WHERE is_admin = 1 LIMIT 1").Scan(&adminID)
+	err := authDB.QueryRow("SELECT id FROM users WHERE is_admin = 1 AND tenant_id = ? LIMIT 1", tenantID).Scan(&adminID)
 	if err != nil {
 		return nil
 	}
 
 	// 1. Try Primary Device
 	var primaryJID string
-	err = authDB.QueryRow("SELECT device_jid FROM user_devices WHERE user_id = ? AND is_primary = 1", adminID).Scan(&primaryJID)
+	err = authDB.QueryRow("SELECT device_jid FROM user_devices WHERE user_id = ? AND is_primary = 1 AND tenant_id = ?", adminID, tenantID).Scan(&primaryJID)
 	if err == nil && primaryJID != "" {
 		if cli := getUserDeviceClient(adminID, primaryJID); cli != nil {
 			return cli
@@ -1690,8 +1891,8 @@ func getUserClient(userID int) *whatsmeow.Client {
 	return nil
 }
 
-func startAllUserDevices(userID int) {
-	rows, err := authDB.Query("SELECT device_jid FROM user_devices WHERE user_id = ?", userID)
+func startAllUserDevices(userID int, tenantID int) {
+	rows, err := authDB.Query("SELECT device_jid FROM user_devices WHERE user_id = ? AND tenant_id = ?", userID, tenantID)
 	if err != nil {
 		log.Println("Error querying user devices:", err)
 		return
@@ -1701,12 +1902,12 @@ func startAllUserDevices(userID int) {
 	for rows.Next() {
 		var jidStr string
 		if err := rows.Scan(&jidStr); err == nil {
-			go startUserDevice(userID, jidStr)
+			go startUserDevice(userID, jidStr, tenantID)
 		}
 	}
 }
 
-func startUserDevice(userID int, deviceJIDStr string) *whatsmeow.Client {
+func startUserDevice(userID int, deviceJIDStr string, tenantID int) *whatsmeow.Client {
 	// 1. Initialize maps if needed
 	clientMutex.Lock()
 	if userClients[userID] == nil {
@@ -1855,27 +2056,50 @@ func handleUserEvent(userID int, cli *whatsmeow.Client, evt interface{}) {
 		go func() {
 			log.Printf("[User %d] Received message: %s", userID, msg)
 
+			// Get tenant ID for this user
+			var tenantID int
+			err := authDB.QueryRow("SELECT tenant_id FROM users WHERE id = ?", userID).Scan(&tenantID)
+			if err != nil {
+				log.Println("Error getting tenant for user", userID, ":", err)
+				tenantID = 1 // fallback
+			}
+
+			// Send typing indicator to WhatsApp
+			ctxTyping, cancelTyping := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := cli.SendChatPresence(ctxTyping, v.Info.Chat, types.ChatPresenceComposing, types.ChatPresenceMediaText); err != nil {
+				log.Printf("[User %d] Failed to send typing indicator: %v", userID, err)
+			} else {
+				log.Printf("[User %d] Typing indicator sent", userID)
+			}
+			cancelTyping()
+
 			// Add random delay to mimic human typing (5-30 seconds) and reduce ban risk
 			delaySeconds := time.Duration(rand.Intn(25)+5) * time.Second
 			log.Printf("[User %d] Waiting %v before replying...", userID, delaySeconds)
 			time.Sleep(delaySeconds)
 
-			reply := callAI(msg)
+			reply := callAI(tenantID, msg)
 			log.Printf("[User %d] AI Reply: %s", userID, reply)
 
 			historyMutex.Lock()
 			chatHistories[userChatKey] = append(chatHistories[userChatKey], "Assistant: "+reply)
 			historyMutex.Unlock()
 
-			// Reply using the SAME client that received the message
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			_, err := cli.SendMessage(ctx, v.Info.Chat, &waE2E.Message{Conversation: &reply})
-			if err != nil {
-				log.Printf("[User %d] Failed to send reply: %v", userID, err)
-			} else {
-				log.Printf("[User %d] Message sent successfully to %s", userID, v.Info.Chat.User)
+		// Reply using the SAME client that received the message
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_, sendErr := cli.SendMessage(ctx, v.Info.Chat, &waE2E.Message{Conversation: &reply})
+		if sendErr != nil {
+			log.Printf("[User %d] Failed to send reply: %v", userID, sendErr)
+		} else {
+			log.Printf("[User %d] Message sent successfully to %s", userID, v.Info.Chat.User)
+		}
+
+			ctxStop, cancelStop := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := cli.SendChatPresence(ctxStop, v.Info.Chat, types.ChatPresencePaused, types.ChatPresenceMediaText); err != nil {
+				log.Printf("[User %d] Failed to stop typing indicator: %v", userID, err)
 			}
+			cancelStop()
 		}()
 
 	case *events.Connected:
@@ -1903,23 +2127,31 @@ func handleUserEvent(userID int, cli *whatsmeow.Client, evt interface{}) {
 		log.Printf("User %d Pair Success: %s", userID, v.ID.String())
 		newJID := v.ID.String()
 
+		// Get tenant ID for this user
+		var tenantID int
+		err := authDB.QueryRow("SELECT tenant_id FROM users WHERE id = ?", userID).Scan(&tenantID)
+		if err != nil {
+			log.Println("Error getting tenant for user", userID, ":", err)
+			tenantID = 1 // fallback
+		}
+
 		// 1. Check if device already exists for this user
 		var exists int
-		err := authDB.QueryRow("SELECT COUNT(*) FROM user_devices WHERE user_id = ? AND device_jid = ?", userID, newJID).Scan(&exists)
+		err = authDB.QueryRow("SELECT COUNT(*) FROM user_devices WHERE user_id = ? AND device_jid = ? AND tenant_id = ?", userID, newJID, tenantID).Scan(&exists)
 		if err != nil {
 			log.Println("Error checking device existence:", err)
 		}
 
 		if exists > 0 {
 			log.Printf("Device %s already exists for user %d. Updating status instead of inserting.", newJID, userID)
-			_, err = authDB.Exec("UPDATE user_devices SET status = 'CONNECTED', alias = 'WhatsApp Device' WHERE user_id = ? AND device_jid = ?", userID, newJID)
+			_, err = authDB.Exec("UPDATE user_devices SET status = 'CONNECTED', alias = 'WhatsApp Device' WHERE user_id = ? AND device_jid = ? AND tenant_id = ?", userID, newJID, tenantID)
 			if err != nil {
 				log.Println("Error updating existing device:", err)
 			}
 		} else {
 			// 2. Save to DB if not exists
-			_, err = authDB.Exec("INSERT INTO user_devices (user_id, device_jid, alias, status) VALUES (?, ?, ?, ?)",
-				userID, newJID, "WhatsApp Device", "CONNECTED")
+			_, err = authDB.Exec("INSERT INTO user_devices (tenant_id, user_id, device_jid, alias, status) VALUES (?, ?, ?, ?, ?)",
+				tenantID, userID, newJID, "WhatsApp Device", "CONNECTED")
 			if err != nil {
 				log.Println("Error saving new device to DB:", err)
 			}
@@ -1939,31 +2171,35 @@ func handleUserEvent(userID int, cli *whatsmeow.Client, evt interface{}) {
 	}
 }
 
-func callAI(prompt string) string {
+func callAI(tenantID int, prompt string) string {
 	const MaxInputLength = 4000
 	if len(prompt) > MaxInputLength {
 		prompt = prompt[:MaxInputLength]
 	}
 
-	// 1. Get Knowledge
-	mu.Lock()
-	contextText := knowledgeText
-	mu.Unlock()
+	// 1. Get Knowledge for tenant
+	knowledgeMutex.RLock()
+	contextText := tenantKnowledge[tenantID]
+	knowledgeMutex.RUnlock()
 
 	if len(contextText) > 15000 {
 		contextText = contextText[:15000]
 	}
 
-	// 2. Build System Prompt
+	// 2. Build System Prompt (use global config)
+	mu.Lock()
 	sysPrompt := cfg.SystemPrompt
+	mu.Unlock()
 	if sysPrompt == "" {
 		sysPrompt = "You are a helpful assistant."
 	}
 
 	fullPrompt := fmt.Sprintf("%s\n\nContext:\n%s\n\nUser Question: %s", sysPrompt, contextText, prompt)
 
-	// 3. Choose Provider
+	// 3. Choose Provider (global config)
+	mu.Lock()
 	providerName := cfg.ActiveProvider
+	mu.Unlock()
 	if providerName == "" {
 		providerName = "gemini" // Default
 	}
@@ -2309,37 +2545,62 @@ func connectSheets() {
 	sheetSchema = "Sheets connected."
 }
 
-func refreshKnowledge() {
-	// Placeholder for scraping/reading files
-	// This would read cfg.KnowledgeFiles and cfg.KnowledgeURLs
-	mu.Lock()
-	defer mu.Unlock()
-
+// rebuildTenantKnowledge rebuilds the knowledge base for a specific tenant
+func rebuildTenantKnowledge(tenantID int) {
 	var sb strings.Builder
 
-	// Read Files
-	for _, f := range cfg.KnowledgeFiles {
-		content, err := os.ReadFile("uploads/" + f)
-		if err == nil {
-			sb.WriteString("\n--- File: " + f + " ---\n")
-			// If PDF, use pdf reader (simplified)
-			if strings.HasSuffix(f, ".pdf") {
-				// PDF logic here
-			} else {
-				sb.Write(content)
+	// Query knowledge files for this tenant
+	rows, err := authDB.Query("SELECT filename FROM tenant_knowledge_files WHERE tenant_id = ?", tenantID)
+	if err != nil {
+		log.Println("Error querying knowledge files for tenant", tenantID, ":", err)
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var filename string
+		if err := rows.Scan(&filename); err == nil {
+			content, err := os.ReadFile("uploads/" + filename)
+			if err == nil {
+				sb.WriteString("\n--- File: " + filename + " ---\n")
+				if strings.HasSuffix(filename, ".pdf") {
+					// PDF handling placeholder
+				} else {
+					sb.Write(content)
+				}
 			}
 		}
 	}
 
-	knowledgeText = sb.String()
-	log.Println("Knowledge Base Updated. Total chars:", len(knowledgeText))
+	knowledgeMutex.Lock()
+	tenantKnowledge[tenantID] = sb.String()
+	knowledgeMutex.Unlock()
+	log.Printf("Tenant %d knowledge updated. Total chars: %d\n", tenantID, len(sb.String()))
+}
+
+// refreshKnowledge rebuilds knowledge for all tenants
+func refreshKnowledge() {
+	// Get all tenant IDs
+	rows, err := authDB.Query("SELECT id FROM tenants")
+	if err != nil {
+		log.Println("Error fetching tenants for knowledge refresh:", err)
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var tenantID int
+		if err := rows.Scan(&tenantID); err == nil {
+			rebuildTenantKnowledge(tenantID)
+		}
+	}
 }
 
 func processFollowups() {
 	for {
 		time.Sleep(1 * time.Minute)
 
-		rows, err := authDB.Query("SELECT id, user_id, jid, instruction FROM followup_tasks WHERE status = 'pending' AND scheduled_time <= datetime('now')")
+		rows, err := authDB.Query("SELECT id, user_id, tenant_id, jid, instruction FROM followup_tasks WHERE status = 'pending' AND scheduled_time <= datetime('now')")
 		if err != nil {
 			log.Println("Scheduler Error:", err)
 			continue
@@ -2348,7 +2609,7 @@ func processFollowups() {
 		var tasks []FollowupTask
 		for rows.Next() {
 			var t FollowupTask
-			if err := rows.Scan(&t.ID, &t.UserID, &t.JID, &t.Instruction); err == nil {
+			if err := rows.Scan(&t.ID, &t.UserID, &t.TenantID, &t.JID, &t.Instruction); err == nil {
 				tasks = append(tasks, t)
 			}
 		}
@@ -2357,8 +2618,8 @@ func processFollowups() {
 		for _, t := range tasks {
 			log.Println("Processing Followup Task:", t.ID)
 
-			// Generate Message
-			reply := callAI("Generate a follow-up message for: " + t.Instruction)
+		// Generate Message
+		reply := callAI(t.TenantID, "Generate a follow-up message for: " + t.Instruction)
 
 			// Send
 			cli := getUserClient(t.UserID)

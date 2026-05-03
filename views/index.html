@@ -1957,8 +1957,15 @@
             appendChatMessage('user', message);
             input.value = '';
             
-            // Show Loading
-            const loadingId = appendChatMessage('bot', 'Sedang mengetik...');
+            // Show Loading with animated dots
+            const loadingId = appendChatMessage('bot', 'Sedang mengetik');
+            const loadingElement = document.getElementById(loadingId)?.querySelector('p');
+            let dotCount = 0;
+            const typingInterval = setInterval(() => {
+                if (!loadingElement) return;
+                dotCount = (dotCount + 1) % 4;
+                loadingElement.textContent = 'Sedang mengetik' + '.'.repeat(dotCount);
+            }, 500);
 
             try {
                 const res = await fetchAuth('/api/test-ai', {
@@ -1968,8 +1975,8 @@
                 });
                 const data = await res.json();
 
-                // Remove Loading
-                document.getElementById(loadingId).remove();
+                clearInterval(typingInterval);
+                if (document.getElementById(loadingId)) document.getElementById(loadingId).remove();
 
                 if (data.success) {
                     appendChatMessage('bot', data.reply);
@@ -1977,6 +1984,7 @@
                     appendChatMessage('bot', 'Error: ' + (data.message || 'Gagal terhubung ke AI'));
                 }
             } catch (error) {
+                clearInterval(typingInterval);
                 if (document.getElementById(loadingId)) document.getElementById(loadingId).remove();
                 appendChatMessage('bot', 'Error: Terjadi kesalahan sistem');
                 console.error(error);
