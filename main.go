@@ -534,12 +534,19 @@ func main() {
 				log.Println("Migration Insert Error:", err)
 			}
 		}
-		['', {'log.Println(': 'igrating DB: Adding repeat columns to followup_tasks table...', 'none': 'authDB.Exec(', ')\n\t\tauthDB.Exec("ALTER TABLE followup_tasks ADD COLUMN repeat_times INTEGER DEFAULT 0")\n\t\tauthDB.Exec("ALTER TABLE followup_tasks ADD COLUMN repeat_done INTEGER DEFAULT 0")\n\t\tauthDB.Exec("ALTER TABLE followup_tasks ADD COLUMN repeat_until DATETIME': ''}]
-	var tenantCount int
-	authDB.QueryRow("SELECT COUNT(*) FROM tenants").Scan(&tenantCount)
-	if tenantCount == 0 {
-		authDB.Exec("INSERT INTO tenants (name) VALUES (?)", "default")
-		log.Println("Created default tenant")
+
+// Migration: Add repeat columns to followup_tasks
+		log.Println("Migrating DB: Adding repeat columns to followup_tasks table...")
+		authDB.Exec("ALTER TABLE followup_tasks ADD COLUMN repeat_times INTEGER DEFAULT 0")
+		authDB.Exec("ALTER TABLE followup_tasks ADD COLUMN repeat_done INTEGER DEFAULT 0")
+		authDB.Exec("ALTER TABLE followup_tasks ADD COLUMN repeat_until DATETIME")
+
+var tenantCount int
+		authDB.QueryRow("SELECT COUNT(*) FROM tenants").Scan(&tenantCount)
+		if tenantCount == 0 {
+			authDB.Exec("INSERT INTO tenants (name) VALUES (?)", "default")
+			log.Println("Created default tenant")
+		}
 	}
 
 	// Get default tenant ID
@@ -1352,9 +1359,9 @@ func main() {
 			if cli != nil {
 				cli.Logout(context.Background())
 				cli.Disconnect()
-	// Remove association in DB
-	tenantID := c.Locals("tenantID").(int)
-	authDB.Exec("UPDATE users SET device_jid = '' WHERE id = ? AND tenant_id = ?", userID, tenantID)
+				// Remove association in DB
+				tenantID := c.Locals("tenantID").(int)
+				authDB.Exec("UPDATE users SET device_jid = '' WHERE id = ? AND tenant_id = ?", userID, tenantID)
 				// Remove from memory
 				clientMutex.Lock()
 				delete(userClients, userID)
@@ -1640,14 +1647,29 @@ func main() {
 		return c.JSON(fiber.Map{"success": true})
 	})
 
-	// Chat Contacts
+	// Chat Contacts (filtered by tenant and user)
 	api.Get("/chat-contacts", func(c *fiber.Ctx) error {
-		// Return all for now, ideally filter by user
+		userID := c.Locals("userID").(int)
+		tenantID := c.Locals("tenantID").(int)
 		historyMutex.Lock()
 		defer historyMutex.Unlock()
 		contacts := []string{}
-		for jid := range chatHistories {
-			contacts = append(contacts, jid)
+		for chatKey := range chatHistories {
+			// chatKey format: "userID:jid" or just "jid" (legacy)
+			parts := strings.SplitN(chatKey, ":", 2)
+			if len(parts) == 2 {
+				// New format: check both userID and tenant
+				uidStr := parts[0]
+				if uid, err := strconv.Atoi(uidStr); err == nil && uid == userID {
+					// Verify user belongs to tenant
+					var userTenantID int
+					err := authDB.QueryRow("SELECT tenant_id FROM users WHERE id = ?", userID).Scan(&userTenantID)
+					if err == nil && userTenantID == tenantID {
+						contacts = append(contacts, parts[1])
+					}
+				}
+			}
+			// Legacy format (without userID prefix) - skip for multi-tenancy
 		}
 		return c.JSON(fiber.Map{"success": true, "contacts": contacts})
 	})
@@ -1831,13 +1853,92 @@ func main() {
 		return c.JSON(fiber.Map{"success": true})
 	})
 
+	// --- TENANT MANAGEMENT ROUTES (Admin Only) ---
+	tenantGroup := api.Group("/tenants")
+
+	// List tenants
+	tenantGroup.Get("/", func(c *fiber.Ctx) error {
+		if isAdmin, ok := c.Locals("isAdmin").(bool); !ok || !isAdmin {
+			return c.Status(403).JSON(fiber.Map{"error": "Requires Admin privileges"})
+		}
+		rows, err := authDB.Query("SELECT id, name, created_at FROM tenants ORDER BY id ASC")
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": "Database error"})
+		}
+		defer rows.Close()
+		var tenants []fiber.Map
+		for rows.Next() {
+			var id int
+			var name string
+			var createdAt time.Time
+			if err := rows.Scan(&id, &name, &createdAt); err == nil {
+				tenants = append(tenants, fiber.Map{
+					"id":   id,
+					"name": name,
+					"created_at": createdAt.Format(time.RFC3339),
+				})
+			}
+		}
+		return c.JSON(fiber.Map{"tenants": tenants})
+	})
+
+	// Create tenant
+	tenantGroup.Post("/", func(c *fiber.Ctx) error {
+		if isAdmin, ok := c.Locals("isAdmin").(bool); !ok || !isAdmin {
+			return c.Status(403).JSON(fiber.Map{"error": "Requires Admin privileges"})
+		}
+		var req struct {
+			Name string `json:"name"`
+		}
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "Invalid JSON"})
+		}
+		if req.Name == "" {
+			return c.Status(400).JSON(fiber.Map{"error": "Tenant name required"})
+		}
+
+		// Insert tenant
+		result, err := authDB.Exec("INSERT INTO tenants (name) VALUES (?)", req.Name)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": "Tenant name already exists or database error"})
+		}
+
+		tenantID, _ := result.LastInsertId()
+		return c.JSON(fiber.Map{"success": true, "tenant_id": tenantID})
+	})
+
+	// Delete tenant
+	tenantGroup.Delete("/:id", func(c *fiber.Ctx) error {
+		if isAdmin, ok := c.Locals("isAdmin").(bool); !ok || !isAdmin {
+			return c.Status(403).JSON(fiber.Map{"error": "Requires Admin privileges"})
+		}
+		id := c.Params("id")
+		currentTenantID := c.Locals("tenantID").(int)
+
+		// Prevent deleting current tenant
+		if strconv.Itoa(currentTenantID) == id {
+			return c.Status(400).JSON(fiber.Map{"error": "Cannot delete current tenant"})
+		}
+
+		// Delete users and devices for this tenant first (cascade should handle but explicit)
+		authDB.Exec("DELETE FROM user_devices WHERE tenant_id = ?", id)
+		authDB.Exec("DELETE FROM followup_tasks WHERE tenant_id = ?", id)
+		authDB.Exec("DELETE FROM tenant_knowledge_files WHERE tenant_id = ?", id)
+		authDB.Exec("DELETE FROM users WHERE tenant_id = ?", id)
+
+		// Delete tenant
+		authDB.Exec("DELETE FROM tenants WHERE id = ?", id)
+
+		return c.JSON(fiber.Map{"success": true})
+	})
+
 	api.Get("/models", fetchModelsHandler)
 	api.Get("/version", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{
 			"success":    true,
-			"version":    "1.2.0-MultiUser",
-			"build_time": "2026-02-09",
-			"features":   []string{"multi-device", "otp-login", "admin-bypass"},
+			"version":    "1.3.0-MultiTenant",
+			"build_time": "2026-05-04",
+			"features":   []string{"multi-device", "otp-login", "multi-tenancy", "tenant-management"},
 		})
 	})
 

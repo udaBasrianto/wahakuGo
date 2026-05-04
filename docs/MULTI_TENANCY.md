@@ -153,8 +153,30 @@ VALUES ('admin2', 'hashedpass', 2, 1, 1);
 
 ## Future Improvements
 
-- Tenant management API (CRUD tenants)
 - Tenant-specific AI provider configuration
 - Tenant-specific system prompt customization
 - Per-tenant rate limits
 - Tenant-specific Google Sheets integration
+
+## Tenant Management API
+
+Admin dapat mengelola tenants melalui API:
+
+### List Tenants
+```bash
+curl -H "X-Tenant-ID: 1" -b "session_id=..." http://localhost:4500/api/tenants
+```
+
+### Create Tenant
+```bash
+curl -H "X-Tenant-ID: 1" -X POST http://localhost:4500/api/tenants \
+  -H "Content-Type: application/json" \
+  -d '{"name":"tenant_new"}'
+```
+
+### Delete Tenant
+```bash
+curl -H "X-Tenant-ID: 1" -X DELETE http://localhost:4500/api/tenants/2
+```
+
+## Running Tests
