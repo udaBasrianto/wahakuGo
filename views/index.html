@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Wahaku Bot Dashboard</title>
+    <title>Dashboard</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🤖</text></svg>">
     <link href="/styles.css?v=4.2" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
@@ -54,8 +54,10 @@
         <!-- Sidebar -->
         <aside id="sidebar" class="fixed inset-y-0 left-0 z-30 w-64 bg-white border-r border-gray-200 transform -translate-x-full md:translate-x-0 transition-transform duration-300 flex flex-col">
             <div class="h-16 flex items-center justify-center border-b border-gray-100">
-                <h1 class="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-purple-600">
-                    <i class="fas fa-robot mr-2 text-blue-600"></i>Wahaku
+                <h1 class="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-purple-600 flex items-center gap-2">
+                    <img id="app-logo" class="w-8 h-8 rounded hidden" alt="Logo">
+                    <i id="app-logo-fallback" class="fas fa-robot text-blue-600"></i>
+                    <span id="app-name" data-brand-name>Wahaku</span>
                 </h1>
             </div>
 
@@ -108,10 +110,14 @@
                     <i class="fas fa-users w-5 text-center"></i>
                     <span class="font-medium text-sm">Kelola User</span>
                 </button>
+                <button id="nav-branding" onclick="showSection('branding')" class="nav-item hidden w-full text-left flex items-center gap-3 px-3 py-2.5 rounded-lg text-gray-600 hover:bg-blue-50 hover:text-blue-700 transition-colors">
+                    <i class="fas fa-paint-brush w-5 text-center"></i>
+                    <span class="font-medium text-sm">Branding</span>
+                </button>
             </nav>
             
             <div class="p-4 border-t bg-gray-50 text-xs text-center text-gray-400">
-                v4.2.0 &copy; 2024 Wahaku
+                <span id="app-version-footer" data-brand-version>v-</span> &copy; <span data-brand-name>Wahaku</span>
             </div>
         </aside>
 
@@ -459,7 +465,7 @@
                             <!-- Messages will appear here -->
                             <div class="flex justify-start">
                                 <div class="bg-white border border-gray-200 rounded-lg rounded-tl-none py-2 px-4 max-w-[80%] shadow-sm">
-                                    <p class="text-sm text-gray-800">Halo! Saya Wahaku Bot. Ada yang bisa saya bantu?</p>
+                                    <p class="text-sm text-gray-800">Halo! Saya <span data-brand-name>Wahaku</span> Bot. Ada yang bisa saya bantu?</p>
                                 </div>
                             </div>
                         </div>
@@ -550,6 +556,48 @@
                                 </button>
                             </div>
                         </form>
+                    </div>
+                </div>
+
+                <!-- SECTION: BRANDING (ADMIN ONLY) -->
+                <div id="section-branding" class="section-content hidden space-y-6">
+                    <div class="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 max-w-2xl">
+                        <div class="flex justify-between items-center mb-6">
+                            <h3 class="text-lg font-bold text-gray-800"><i class="fas fa-paint-brush text-purple-600 mr-2"></i> Branding Aplikasi</h3>
+                            <button type="button" onclick="saveBrandingSettings()" class="bg-purple-600 hover:bg-purple-700 text-white px-6 py-2 rounded-lg font-medium transition">
+                                <i class="fas fa-save mr-2"></i> Simpan
+                            </button>
+                        </div>
+
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div class="md:col-span-2">
+                                <label class="text-xs font-bold text-gray-500 uppercase">Nama Aplikasi</label>
+                                <input type="text" id="branding_name" class="w-full p-3 mt-1 bg-gray-50 border rounded-lg" placeholder="Nama aplikasi">
+                            </div>
+                            <div class="md:col-span-2">
+                                <label class="text-xs font-bold text-gray-500 uppercase">Versi (Display)</label>
+                                <input type="text" id="branding_version" class="w-full p-3 mt-1 bg-gray-50 border rounded-lg" placeholder="contoh: v1.0.0">
+                                <p class="text-xs text-gray-400 mt-1">Versi ini tampil di UI (bukan build version).</p>
+                            </div>
+                        </div>
+
+                        <div class="mt-8 border-t pt-6">
+                            <div class="flex items-center justify-between gap-4 flex-wrap">
+                                <div class="flex items-center gap-4">
+                                    <img id="branding_logo_preview" class="w-14 h-14 rounded-lg border bg-white object-contain hidden" alt="Logo preview">
+                                    <div class="text-sm text-gray-600">
+                                        <div class="font-bold text-gray-800">Logo Aplikasi</div>
+                                        <div class="text-xs text-gray-500">PNG/JPG/WEBP, maksimal 2MB</div>
+                                    </div>
+                                </div>
+                                <div class="flex items-center gap-3">
+                                    <input type="file" id="branding_logo_file" accept=".png,.jpg,.jpeg,.webp" class="text-sm">
+                                    <button type="button" onclick="uploadBrandLogo()" class="bg-gray-900 hover:bg-gray-800 text-white px-5 py-2 rounded-lg font-semibold transition">
+                                        <i class="fas fa-upload mr-2"></i> Upload
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
@@ -972,6 +1020,8 @@
                         if (me.is_admin) {
                             const navUsers = document.getElementById('nav-users');
                             if (navUsers) navUsers.classList.remove('hidden');
+                            const navBranding = document.getElementById('nav-branding');
+                            if (navBranding) navBranding.classList.remove('hidden');
                         }
                     }
                 } catch(e) { console.error("Failed to load user info", e); }
@@ -1019,6 +1069,24 @@
 
         function renderUI() {
             if (!currentConfig || Object.keys(currentConfig).length === 0) return;
+
+            if (typeof currentConfig.branding_name === 'string') {
+                const el = document.getElementById('branding_name');
+                if (el) el.value = currentConfig.branding_name || '';
+            }
+            if (typeof currentConfig.branding_version === 'string') {
+                const el = document.getElementById('branding_version');
+                if (el) el.value = currentConfig.branding_version || '';
+            }
+            if (typeof currentConfig.branding_logo === 'string') {
+                const preview = document.getElementById('branding_logo_preview');
+                if (preview && currentConfig.branding_logo) {
+                    preview.src = currentConfig.branding_logo;
+                    preview.classList.remove('hidden');
+                } else if (preview) {
+                    preview.classList.add('hidden');
+                }
+            }
             
             // 1. System Prompt
             const sysPromptEl = document.getElementById('system_prompt');
@@ -2032,7 +2100,7 @@
             document.getElementById('test-ai-chat-history').innerHTML = `
                 <div class="flex justify-start">
                     <div class="bg-white border border-gray-200 rounded-lg rounded-tl-none py-2 px-4 max-w-[80%] shadow-sm">
-                        <p class="text-sm text-gray-800">Halo! Saya Wahaku Bot. Ada yang bisa saya bantu?</p>
+                        <p class="text-sm text-gray-800">Halo! Saya <span data-brand-name>Wahaku</span> Bot. Ada yang bisa saya bantu?</p>
                     </div>
                 </div>
             `;
@@ -2267,6 +2335,7 @@
 
         // INIT
         document.addEventListener('DOMContentLoaded', () => {
+            loadBrandingPublic();
             loadData();
             
             // Failsafe Removal
@@ -2278,6 +2347,110 @@
                 }
             }, 3000); // 3 seconds max wait
         });
+
+        function applyBranding(branding) {
+            const name = (branding && typeof branding.name === 'string' ? branding.name.trim() : '') || 'Wahaku';
+            const versionRaw = (branding && typeof branding.version === 'string' ? branding.version.trim() : '');
+            const version = versionRaw ? versionRaw : '';
+            const logo = (branding && typeof branding.logo === 'string' ? branding.logo.trim() : '');
+
+            document.title = name + ' Dashboard';
+
+            document.querySelectorAll('[data-brand-name]').forEach(el => {
+                el.textContent = name;
+            });
+            document.querySelectorAll('[data-brand-version]').forEach(el => {
+                el.textContent = version ? version : 'v-';
+            });
+
+            const logoImg = document.getElementById('app-logo');
+            const logoFallback = document.getElementById('app-logo-fallback');
+            if (logoImg && logoFallback) {
+                if (logo) {
+                    logoImg.src = logo;
+                    logoImg.classList.remove('hidden');
+                    logoFallback.classList.add('hidden');
+                } else {
+                    logoImg.classList.add('hidden');
+                    logoFallback.classList.remove('hidden');
+                }
+            }
+        }
+
+        async function loadBrandingPublic() {
+            try {
+                const res = await fetch('/api/public/branding', { credentials: 'include' });
+                if (!res.ok) return;
+                const data = await res.json();
+                if (data && data.success) {
+                    applyBranding({ name: data.name, logo: data.logo, version: data.version });
+                }
+            } catch (e) {}
+        }
+
+        async function saveBrandingSettings() {
+            if (!currentConfig) return;
+            const nameEl = document.getElementById('branding_name');
+            const verEl = document.getElementById('branding_version');
+            const name = nameEl ? nameEl.value.trim() : '';
+            const version = verEl ? verEl.value.trim() : '';
+
+            if (!name) {
+                Swal.fire('Peringatan', 'Nama aplikasi tidak boleh kosong', 'warning');
+                return;
+            }
+
+            currentConfig.branding_name = name;
+            currentConfig.branding_version = version;
+
+            try {
+                const res = await fetchAuth('/api/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(currentConfig)
+                });
+                if (!res.ok) throw new Error('Gagal menyimpan');
+                Swal.fire('Berhasil', 'Branding disimpan', 'success');
+                applyBranding({ name: currentConfig.branding_name, logo: currentConfig.branding_logo, version: currentConfig.branding_version });
+            } catch (e) {
+                Swal.fire('Gagal', e.message || 'Gagal menyimpan', 'error');
+            }
+        }
+
+        async function uploadBrandLogo() {
+            const input = document.getElementById('branding_logo_file');
+            if (!input || !input.files || !input.files[0]) {
+                Swal.fire('Peringatan', 'Pilih file logo terlebih dahulu', 'warning');
+                return;
+            }
+            const file = input.files[0];
+            if (file.size > 2 * 1024 * 1024) {
+                Swal.fire('Peringatan', 'Ukuran file maksimal 2MB', 'warning');
+                return;
+            }
+
+            const form = new FormData();
+            form.append('logo', file);
+
+            try {
+                const res = await fetchAuth('/api/branding/logo', { method: 'POST', body: form, headers: {} });
+                const data = await res.json();
+                if (!res.ok || !data.success) throw new Error(data.message || 'Gagal upload logo');
+
+                currentConfig.branding_logo = data.logo;
+                const preview = document.getElementById('branding_logo_preview');
+                if (preview) {
+                    preview.src = data.logo;
+                    preview.classList.remove('hidden');
+                }
+                applyBranding({ name: currentConfig.branding_name, logo: currentConfig.branding_logo, version: currentConfig.branding_version });
+                Swal.fire('Berhasil', 'Logo berhasil diupdate', 'success');
+            } catch (e) {
+                Swal.fire('Gagal', e.message || 'Gagal upload logo', 'error');
+            } finally {
+                input.value = '';
+            }
+        }
 
         // --- TEST CONNECTIONS ---
         async function testDB() {

@@ -78,6 +78,9 @@ type Config struct {
 	ActiveProvider string                    `json:"active_provider"`
 	AdminUsername  string                    `json:"admin_username"`
 	AdminPassword  string                    `json:"admin_password"`
+	BrandingName   string                    `json:"branding_name"`
+	BrandingLogo   string                    `json:"branding_logo"`
+	BrandingVersion string                   `json:"branding_version"`
 	SystemPrompt   string                    `json:"system_prompt"`
 	SavedPrompts   map[string]string         `json:"saved_prompts"`
 	KnowledgeURLs  []string                  `json:"knowledge_urls"`
@@ -123,6 +126,8 @@ var (
 )
 
 const redactedSecret = "__REDACTED__"
+const buildVersion = "1.3.0-MultiTenant"
+const buildTime = "2026-05-04"
 
 type User struct {
 	ID       int    `json:"id"`
@@ -882,7 +887,7 @@ func main() {
 		}
 
 		// Whitelist Routes
-		if path == "/" || path == "/landing" || path == "/landing.html" || path == "/login" || path == "/register" || strings.HasPrefix(path, "/api/auth") {
+		if path == "/" || path == "/landing" || path == "/landing.html" || path == "/login" || path == "/register" || strings.HasPrefix(path, "/api/auth") || strings.HasPrefix(path, "/api/public") {
 			return c.Next()
 		}
 
@@ -1452,6 +1457,35 @@ func main() {
 		go connectSheets()
 		go refreshKnowledge()
 		return c.JSON(fiber.Map{"success": true})
+	})
+
+	api.Post("/branding/logo", requireAdmin, func(c *fiber.Ctx) error {
+		file, err := c.FormFile("logo")
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "File logo wajib diupload"})
+		}
+		if file.Size > 2*1024*1024 {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Ukuran file maksimal 2MB"})
+		}
+
+		ext := strings.ToLower(filepath.Ext(file.Filename))
+		switch ext {
+		case ".png", ".jpg", ".jpeg", ".webp":
+		default:
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Format logo harus PNG/JPG/WEBP"})
+		}
+
+		filename := "brand-logo" + ext
+		dstPath := filepath.Join("views", filename)
+		if err := c.SaveFile(file, dstPath); err != nil {
+			log.Println("Failed to save logo:", err)
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Gagal menyimpan logo"})
+		}
+
+		cfg.BrandingLogo = "/" + filename
+		saveConfig()
+
+		return c.JSON(fiber.Map{"success": true, "logo": cfg.BrandingLogo})
 	})
 
 	// Follow-up Routes (unchanged)
@@ -2202,17 +2236,26 @@ func main() {
 	})
 
 	api.Post("/models", requireAdmin, fetchModelsHandler)
+	api.Get("/public/branding", func(c *fiber.Ctx) error {
+		return c.JSON(fiber.Map{
+			"success": true,
+			"name":    cfg.BrandingName,
+			"logo":    cfg.BrandingLogo,
+			"version": cfg.BrandingVersion,
+		})
+	})
 	api.Get("/version", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{
-			"success":    true,
-			"version":    "1.3.0-MultiTenant",
-			"build_time": "2026-05-04",
-			"features":   []string{"multi-device", "otp-login", "multi-tenancy", "tenant-management"},
+			"success":         true,
+			"build_version":   buildVersion,
+			"display_version": cfg.BrandingVersion,
+			"build_time":      buildTime,
+			"features":        []string{"multi-device", "otp-login", "multi-tenancy", "tenant-management"},
 		})
 	})
 
-	log.Println("Wahaku Service Starting...")
-	log.Println("Version: 1.2.0-MultiUser")
+	log.Println(cfg.BrandingName + " Service Starting...")
+	log.Println("Build Version:", buildVersion, "Display Version:", cfg.BrandingVersion)
 	log.Println("Server running on http://localhost:" + cfg.AppPort)
 	log.Fatal(app.Listen(":" + cfg.AppPort))
 }
@@ -2817,6 +2860,9 @@ func loadConfig() {
 		cfg = Config{
 			AppPort:       "4500",
 			AdminUsername: "admin",
+			BrandingName:  "Wahaku",
+			BrandingLogo:  "",
+			BrandingVersion: buildVersion,
 			Providers:     make(map[string]ProviderConfig),
 			SavedPrompts:  make(map[string]string),
 		}
@@ -2828,6 +2874,9 @@ func loadConfig() {
 		cfg = Config{
 			AppPort:       "4500",
 			AdminUsername: "admin",
+			BrandingName:  "Wahaku",
+			BrandingLogo:  "",
+			BrandingVersion: buildVersion,
 			Providers:     make(map[string]ProviderConfig),
 			SavedPrompts:  make(map[string]string),
 		}
@@ -2841,6 +2890,12 @@ func loadConfig() {
 	}
 	if cfg.Providers == nil {
 		cfg.Providers = make(map[string]ProviderConfig)
+	}
+	if strings.TrimSpace(cfg.BrandingName) == "" {
+		cfg.BrandingName = "Wahaku"
+	}
+	if strings.TrimSpace(cfg.BrandingVersion) == "" {
+		cfg.BrandingVersion = buildVersion
 	}
 	if strings.TrimSpace(cfg.AdminPassword) == "password" {
 		cfg.AdminPassword = ""

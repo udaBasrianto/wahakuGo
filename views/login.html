@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Login - Wahaku</title>
+    <title>Login</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🤖</text></svg>">
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="/styles.css" rel="stylesheet">
@@ -13,10 +13,11 @@
 <body class="bg-gradient-to-br from-green-400 to-blue-600 min-h-screen flex items-center justify-center p-4 font-sans">
     <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden transform transition-all hover:scale-[1.01] duration-300">
         <div class="bg-gradient-to-r from-green-500 to-blue-500 p-6 text-center">
-             <div class="w-20 h-20 bg-white rounded-full flex items-center justify-center mx-auto mb-4 shadow-lg">
-                <span class="text-4xl">🤖</span>
+             <div class="w-20 h-20 bg-white rounded-full flex items-center justify-center mx-auto mb-4 shadow-lg overflow-hidden">
+                <img id="login-logo" class="w-16 h-16 object-contain hidden" alt="Logo">
+                <span id="login-logo-fallback" class="text-4xl">🤖</span>
             </div>
-            <h1 class="text-3xl font-bold text-white mb-1">Wahaku Login</h1>
+            <h1 class="text-3xl font-bold text-white mb-1"><span id="login-app-name">Wahaku</span> Login</h1>
             <p class="text-green-100 text-sm">Masuk untuk mengelola asisten Anda</p>
         </div>
 
@@ -95,6 +96,35 @@
 
     <!-- CSRF Protection: Override fetch to include token -->
     <script>
+        (async function() {
+            try {
+                const res = await fetch('/api/public/branding', { credentials: 'include' });
+                if (!res.ok) return;
+                const data = await res.json();
+                if (!data || !data.success) return;
+
+                const name = (typeof data.name === 'string' ? data.name.trim() : '') || 'Wahaku';
+                const logo = (typeof data.logo === 'string' ? data.logo.trim() : '');
+
+                document.title = 'Login - ' + name;
+                const nameEl = document.getElementById('login-app-name');
+                if (nameEl) nameEl.textContent = name;
+
+                const logoImg = document.getElementById('login-logo');
+                const fallback = document.getElementById('login-logo-fallback');
+                if (logoImg && fallback) {
+                    if (logo) {
+                        logoImg.src = logo;
+                        logoImg.classList.remove('hidden');
+                        fallback.classList.add('hidden');
+                    } else {
+                        logoImg.classList.add('hidden');
+                        fallback.classList.remove('hidden');
+                    }
+                }
+            } catch (e) {}
+        })();
+
         function getCookie(name) {
             let match = document.cookie.match(new RegExp('(^| )' + name + '=([^;]+)'));
             return match ? decodeURIComponent(match[2]) : null;
