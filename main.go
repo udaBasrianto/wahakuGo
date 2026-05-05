@@ -1980,9 +1980,13 @@ func main() {
 		if prompt == "" {
 			prompt = req.Message
 		}
+		providerName, _, cfgErr := getActiveProviderConfig()
+		if cfgErr != "" {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": cfgErr, "provider": providerName})
+		}
 		tenantID := c.Locals("tenantID").(int)
 		reply := callAI(tenantID, prompt)
-		return c.JSON(fiber.Map{"success": true, "reply": reply})
+		return c.JSON(fiber.Map{"success": true, "reply": reply, "provider": providerName})
 	})
 
 	// Delete Connections
@@ -2616,6 +2620,33 @@ func handleUserEvent(userID int, cli *whatsmeow.Client, evt interface{}) {
 	}
 }
 
+func getActiveProviderConfig() (string, ProviderConfig, string) {
+	mu.Lock()
+	providerName := cfg.ActiveProvider
+	providers := cfg.Providers
+	mu.Unlock()
+
+	if providerName == "" {
+		providerName = "gemini"
+	}
+	if providers == nil {
+		return providerName, ProviderConfig{}, "AI belum dikonfigurasi. Buka Dashboard → AI Brain → isi API Key dan Model."
+	}
+
+	pConfig, ok := providers[providerName]
+	if !ok {
+		return providerName, ProviderConfig{}, "AI belum dikonfigurasi untuk provider '" + providerName + "'. Buka Dashboard → AI Brain dan pilih provider yang benar."
+	}
+	if strings.TrimSpace(pConfig.APIKey) == "" {
+		return providerName, ProviderConfig{}, "API Key untuk provider '" + providerName + "' masih kosong. Buka Dashboard → AI Brain → isi API Key, lalu Simpan."
+	}
+	if strings.TrimSpace(pConfig.Model) == "" {
+		return providerName, ProviderConfig{}, "Model untuk provider '" + providerName + "' masih kosong. Buka Dashboard → AI Brain → pilih Model, lalu Simpan."
+	}
+
+	return providerName, pConfig, ""
+}
+
 func callAI(tenantID int, prompt string) string {
 	const MaxInputLength = 4000
 	if len(prompt) > MaxInputLength {
@@ -2642,16 +2673,9 @@ func callAI(tenantID int, prompt string) string {
 	fullPrompt := fmt.Sprintf("%s\n\nContext:\n%s\n\nUser Question: %s", sysPrompt, contextText, prompt)
 
 	// 3. Choose Provider (global config)
-	mu.Lock()
-	providerName := cfg.ActiveProvider
-	mu.Unlock()
-	if providerName == "" {
-		providerName = "gemini" // Default
-	}
-
-	pConfig, ok := cfg.Providers[providerName]
-	if !ok || pConfig.APIKey == "" {
-		return "Error: AI Provider not configured."
+	providerName, pConfig, cfgErr := getActiveProviderConfig()
+	if cfgErr != "" {
+		return cfgErr
 	}
 
 	// 4. Call API
