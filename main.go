@@ -6,10 +6,10 @@ import (
 	crand "crypto/rand"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"math/big"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -117,8 +117,8 @@ var (
 	authRateLimitMux sync.RWMutex
 
 	// Tenant-specific knowledge cache
-	tenantKnowledge   = make(map[int]string)
-	knowledgeMutex    sync.RWMutex
+	tenantKnowledge = make(map[int]string)
+	knowledgeMutex  sync.RWMutex
 )
 
 const redactedSecret = "__REDACTED__"
@@ -151,12 +151,12 @@ type FollowupTask struct {
 	Status        string    `json:"status"`
 	CreatedAt     time.Time `json:"created_at"`
 	// Recurring configuration
-	RepeatType    string    `json:"repeat_type"`     // "none", "daily", "weekly", "monthly"
+	RepeatType     string    `json:"repeat_type"`     // "none", "daily", "weekly", "monthly"
 	RepeatInterval int       `json:"repeat_interval"` // Every N days/weeks/months
-	RepeatTimes   int       `json:"repeat_times"`    // Total times to repeat (including first), 0 = infinite
-	RepeatDone    int       `json:"repeat_done"`     // How many times executed
-	RepeatUntil   time.Time `json:"repeat_until"`    // Optional end date (overrides RepeatTimes)
-	LastRun       time.Time `json:"last_run"`        // Last execution time
+	RepeatTimes    int       `json:"repeat_times"`    // Total times to repeat (including first), 0 = infinite
+	RepeatDone     int       `json:"repeat_done"`     // How many times executed
+	RepeatUntil    time.Time `json:"repeat_until"`    // Optional end date (overrides RepeatTimes)
+	LastRun        time.Time `json:"last_run"`        // Last execution time
 }
 
 // ========== PASSWORD UTILITIES ==========
@@ -267,6 +267,125 @@ func rateLimitMiddleware(c *fiber.Ctx) error {
 func isProduction() bool {
 	env := strings.ToLower(os.Getenv("APP_ENV"))
 	return env == "production" || env == "prod"
+}
+
+func envBool(name string) bool {
+	val := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	return val == "1" || val == "true" || val == "yes" || val == "y" || val == "on"
+}
+
+func columnExists(db *sql.DB, table, column string) bool {
+	query := fmt.Sprintf("SELECT COUNT(*) FROM pragma_table_info('%s') WHERE name = ?", table)
+	var count int
+	if err := db.QueryRow(query, column).Scan(&count); err != nil {
+		return false
+	}
+	return count > 0
+}
+
+func ensureColumn(db *sql.DB, table, column, alterSQL string) {
+	if columnExists(db, table, column) {
+		return
+	}
+	if _, err := db.Exec(alterSQL); err != nil {
+		log.Println("Failed DB migration for", table, "column", column, ":", err)
+	}
+}
+
+func isPrivateOrLocalIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		if ip4[0] == 10 {
+			return true
+		}
+		if ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31 {
+			return true
+		}
+		if ip4[0] == 192 && ip4[1] == 168 {
+			return true
+		}
+		if ip4[0] == 127 {
+			return true
+		}
+		if ip4[0] == 169 && ip4[1] == 254 {
+			return true
+		}
+		return false
+	}
+	if len(ip) == net.IPv6len {
+		if ip.Equal(net.IPv6loopback) {
+			return true
+		}
+		if ip[0]&0xfe == 0xfc {
+			return true
+		}
+		if ip[0] == 0xfe && ip[1]&0xc0 == 0x80 {
+			return true
+		}
+	}
+	return false
+}
+
+func validateOutboundBaseURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", fmt.Errorf("base_url empty")
+	}
+	if len(raw) > 512 {
+		return "", fmt.Errorf("base_url terlalu panjang")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("base_url tidak valid")
+	}
+	if u.Scheme == "" {
+		u.Scheme = "https"
+	}
+	u.Fragment = ""
+	if u.Scheme != "https" && !(u.Scheme == "http" && envBool("ALLOW_INSECURE_OUTBOUND_HTTP")) {
+		return "", fmt.Errorf("scheme base_url harus https")
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return "", fmt.Errorf("base_url host kosong")
+	}
+	if (host == "localhost" || host == "127.0.0.1" || host == "::1" || strings.HasSuffix(host, ".local")) && !envBool("ALLOW_PRIVATE_OUTBOUND") {
+		return "", fmt.Errorf("base_url host tidak diizinkan")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if isPrivateOrLocalIP(ip) && !envBool("ALLOW_PRIVATE_OUTBOUND") {
+			return "", fmt.Errorf("base_url ip private tidak diizinkan")
+		}
+	} else if !envBool("ALLOW_PRIVATE_OUTBOUND") {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		ips, lookupErr := net.DefaultResolver.LookupIP(ctx, "ip", host)
+		if lookupErr == nil {
+			for _, ip := range ips {
+				if isPrivateOrLocalIP(ip) {
+					return "", fmt.Errorf("base_url resolve ke ip private tidak diizinkan")
+				}
+			}
+		}
+	}
+	port := u.Port()
+	if port != "" && port != "443" && !envBool("ALLOW_NONSTANDARD_OUTBOUND_PORTS") {
+		return "", fmt.Errorf("base_url port tidak diizinkan")
+	}
+	u.Path = strings.TrimSuffix(u.Path, "/")
+	return u.String(), nil
+}
+
+func httpClient(timeout time.Duration) *http.Client {
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	return &http.Client{Timeout: timeout}
 }
 
 func requireAdmin(c *fiber.Ctx) error {
@@ -500,6 +619,13 @@ func main() {
 		authDB.Exec("ALTER TABLE user_devices ADD COLUMN is_primary BOOLEAN DEFAULT 0")
 	}
 
+	ensureColumn(authDB, "followup_tasks", "repeat_times", "ALTER TABLE followup_tasks ADD COLUMN repeat_times INTEGER DEFAULT 0")
+	ensureColumn(authDB, "followup_tasks", "repeat_done", "ALTER TABLE followup_tasks ADD COLUMN repeat_done INTEGER DEFAULT 0")
+	ensureColumn(authDB, "followup_tasks", "repeat_until", "ALTER TABLE followup_tasks ADD COLUMN repeat_until DATETIME")
+	ensureColumn(authDB, "followup_tasks", "last_run", "ALTER TABLE followup_tasks ADD COLUMN last_run DATETIME")
+	ensureColumn(authDB, "followup_tasks", "repeat_type", "ALTER TABLE followup_tasks ADD COLUMN repeat_type TEXT DEFAULT 'none'")
+	ensureColumn(authDB, "followup_tasks", "repeat_interval", "ALTER TABLE followup_tasks ADD COLUMN repeat_interval INTEGER DEFAULT 1")
+
 	// Migration: Move device_jid from users to user_devices if exists
 	var deviceJIDColCount int
 	authDB.QueryRow("SELECT COUNT(*) FROM pragma_table_info('users') WHERE name='device_jid'").Scan(&deviceJIDColCount)
@@ -534,18 +660,13 @@ func main() {
 				log.Println("Migration Insert Error:", err)
 			}
 		}
+	}
 
-// Migration: Add repeat columns to followup_tasks
-		log.Println("Migrating DB: Adding repeat columns to followup_tasks table...")
-		authDB.Exec("ALTER TABLE followup_tasks ADD COLUMN repeat_times INTEGER DEFAULT 0")
-		authDB.Exec("ALTER TABLE followup_tasks ADD COLUMN repeat_done INTEGER DEFAULT 0")
-		authDB.Exec("ALTER TABLE followup_tasks ADD COLUMN repeat_until DATETIME")
-
-var tenantCount int
-		authDB.QueryRow("SELECT COUNT(*) FROM tenants").Scan(&tenantCount)
-		if tenantCount == 0 {
-			authDB.Exec("INSERT INTO tenants (name) VALUES (?)", "default")
-			log.Println("Created default tenant")
+	var tenantCount int
+	authDB.QueryRow("SELECT COUNT(*) FROM tenants WHERE name = ?", "default").Scan(&tenantCount)
+	if tenantCount == 0 {
+		if _, err := authDB.Exec("INSERT INTO tenants (name) VALUES (?)", "default"); err != nil {
+			log.Println("Failed to create default tenant:", err)
 		}
 	}
 
@@ -595,6 +716,17 @@ var tenantCount int
 
 	app := fiber.New(fiber.Config{
 		BodyLimit: 50 * 1024 * 1024, // 50MB Limit
+	})
+	app.Use(func(c *fiber.Ctx) error {
+		p := strings.ToLower(c.Path())
+		if strings.Contains(p, "..") {
+			return c.SendStatus(404)
+		}
+		switch p {
+		case "/config.json", "/wahaku.db", "/wahaku.env", "/.env", "/.git", "/.git/config", "/.gitignore":
+			return c.SendStatus(404)
+		}
+		return c.Next()
 	})
 	allowedOrigins := os.Getenv("CORS_ALLOW_ORIGINS")
 	if allowedOrigins == "" {
@@ -724,8 +856,6 @@ var tenantCount int
 
 		err = authDB.QueryRow(query, req.Username, tenantID).Scan(&user.ID, &user.Username, &user.Email, &user.Password, &user.IsAdmin, &user.IsActive)
 
-		log.Printf("[LOGIN DEBUG] User: %s, ID: %d, Active: %v, Admin: %v, Err: %v", req.Username, user.ID, user.IsActive, user.IsAdmin, err)
-
 		if err == sql.ErrNoRows {
 			return c.Status(401).JSON(fiber.Map{"success": false, "message": "User tidak ditemukan"})
 		} else if err != nil {
@@ -769,42 +899,18 @@ var tenantCount int
 
 		// Password is Valid -> Send OTP
 
-		// Helper to finalize login without OTP (Fallback)
-		finalizeLogin := func() error {
-			sess, err := sessionStore.Get(c)
-			if err == nil {
-				sess.Set("authenticated", true)
-				sess.Set("userID", user.ID)
-				sess.Set("isAdmin", user.IsAdmin)
-				// Set tenantID from context
-				tenantID := c.Locals("tenantID").(int)
-				sess.Set("tenantID", tenantID)
-				sess.Save()
-				return c.JSON(fiber.Map{"success": true, "message": "Login Berhasil (OTP Skipped)"})
-			}
-			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Session Error"})
-		}
-
 		// GET SYSTEM BOT (Admin Bot) to send OTP
 		sysClient := getSystemBot(tenantID)
 
 		// Check if System Bot is connected
 		if sysClient == nil || !sysClient.IsConnected() {
-			if user.Password != "" {
-				log.Printf("[LOGIN WARN] System Bot offline, skipping OTP for user: %s", user.Username)
-				return finalizeLogin()
-			}
-			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Sistem Bot belum terhubung, tidak bisa kirim OTP."})
+			return c.Status(503).JSON(fiber.Map{"success": false, "message": "Sistem OTP sedang offline. Silakan coba lagi beberapa saat."})
 		}
 
 		// Generate OTP
 		otp, err := generateSecureOTP()
 		if err != nil {
 			log.Println("Failed to generate OTP:", err)
-			if user.Password != "" {
-				log.Printf("[LOGIN WARN] Failed to generate OTP, skipping for password-authenticated user: %s", user.Username)
-				return finalizeLogin()
-			}
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Gagal generate OTP"})
 		}
 
@@ -874,7 +980,23 @@ var tenantCount int
 			return c.Status(400).JSON(fiber.Map{"success": false, "message": "OTP kadaluarsa atau tidak ditemukan"})
 		}
 
-		expiry := expiryVal.(int64)
+		var expiry int64
+		switch v := expiryVal.(type) {
+		case int64:
+			expiry = v
+		case int:
+			expiry = int64(v)
+		case float64:
+			expiry = int64(v)
+		case string:
+			if parsed, err := strconv.ParseInt(v, 10, 64); err == nil {
+				expiry = parsed
+			} else {
+				return c.Status(400).JSON(fiber.Map{"success": false, "message": "OTP tidak valid, silakan login ulang"})
+			}
+		default:
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "OTP tidak valid, silakan login ulang"})
+		}
 		if time.Now().Unix() > expiry {
 			return c.Status(400).JSON(fiber.Map{"success": false, "message": "OTP sudah kadaluarsa"})
 		}
@@ -1359,9 +1481,8 @@ var tenantCount int
 			if cli != nil {
 				cli.Logout(context.Background())
 				cli.Disconnect()
-				// Remove association in DB
 				tenantID := c.Locals("tenantID").(int)
-				authDB.Exec("UPDATE users SET device_jid = '' WHERE id = ? AND tenant_id = ?", userID, tenantID)
+				authDB.Exec("UPDATE user_devices SET status = 'DISCONNECTED' WHERE user_id = ? AND tenant_id = ?", userID, tenantID)
 				// Remove from memory
 				clientMutex.Lock()
 				delete(userClients, userID)
@@ -1873,8 +1994,8 @@ var tenantCount int
 			var createdAt time.Time
 			if err := rows.Scan(&id, &name, &createdAt); err == nil {
 				tenants = append(tenants, fiber.Map{
-					"id":   id,
-					"name": name,
+					"id":         id,
+					"name":       name,
 					"created_at": createdAt.Format(time.RFC3339),
 				})
 			}
@@ -1932,7 +2053,7 @@ var tenantCount int
 		return c.JSON(fiber.Map{"success": true})
 	})
 
-	api.Get("/models", fetchModelsHandler)
+	api.Post("/models", requireAdmin, fetchModelsHandler)
 	api.Get("/version", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{
 			"success":    true,
@@ -2172,7 +2293,7 @@ func handleUserEvent(userID int, cli *whatsmeow.Client, evt interface{}) {
 			return
 		}
 
-		log.Printf("[User %d][%s] Received: %s", userID, key, msg)
+		log.Printf("[User %d][%s] Received message (len=%d)", userID, key, len(msg))
 
 		// History
 		chatID := v.Info.Chat.String()
@@ -2187,7 +2308,7 @@ func handleUserEvent(userID int, cli *whatsmeow.Client, evt interface{}) {
 
 		// AI Reply
 		go func() {
-			log.Printf("[User %d] Received message: %s", userID, msg)
+			log.Printf("[User %d] Processing message (len=%d)", userID, len(msg))
 
 			// Get tenant ID for this user
 			var tenantID int
@@ -2212,21 +2333,21 @@ func handleUserEvent(userID int, cli *whatsmeow.Client, evt interface{}) {
 			time.Sleep(delaySeconds)
 
 			reply := callAI(tenantID, msg)
-			log.Printf("[User %d] AI Reply: %s", userID, reply)
+			log.Printf("[User %d] AI Reply generated (len=%d)", userID, len(reply))
 
 			historyMutex.Lock()
 			chatHistories[userChatKey] = append(chatHistories[userChatKey], "Assistant: "+reply)
 			historyMutex.Unlock()
 
-		// Reply using the SAME client that received the message
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		_, sendErr := cli.SendMessage(ctx, v.Info.Chat, &waE2E.Message{Conversation: &reply})
-		if sendErr != nil {
-			log.Printf("[User %d] Failed to send reply: %v", userID, sendErr)
-		} else {
-			log.Printf("[User %d] Message sent successfully to %s", userID, v.Info.Chat.User)
-		}
+			// Reply using the SAME client that received the message
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			_, sendErr := cli.SendMessage(ctx, v.Info.Chat, &waE2E.Message{Conversation: &reply})
+			if sendErr != nil {
+				log.Printf("[User %d] Failed to send reply: %v", userID, sendErr)
+			} else {
+				log.Printf("[User %d] Message sent successfully to %s", userID, v.Info.Chat.User)
+			}
 
 			ctxStop, cancelStop := context.WithTimeout(context.Background(), 5*time.Second)
 			if err := cli.SendChatPresence(ctxStop, v.Info.Chat, types.ChatPresencePaused, types.ChatPresenceMediaText); err != nil {
@@ -2376,7 +2497,9 @@ func callGemini(apiKey, model, baseURL, prompt string) string {
 		},
 	})
 
-	resp, err := http.Post(url, "application/json", bytes.NewBuffer(requestBody))
+	req, _ := http.NewRequest("POST", url, bytes.NewBuffer(requestBody))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient(30 * time.Second).Do(req)
 	if err != nil {
 		return "Error calling Gemini: " + err.Error()
 	}
@@ -2418,8 +2541,7 @@ func callOpenAI(apiKey, model, baseURL, prompt string) string {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := httpClient(30 * time.Second).Do(req)
 	if err != nil {
 		return "Error calling OpenAI: " + err.Error()
 	}
@@ -2470,8 +2592,7 @@ func callDeepSeek(apiKey, model, baseURL, prompt string) string {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := httpClient(30 * time.Second).Do(req)
 	if err != nil {
 		return "Error calling DeepSeek: " + err.Error()
 	}
@@ -2514,8 +2635,7 @@ func callBytePlus(apiKey, model, baseURL, prompt string) string {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := httpClient(30 * time.Second).Do(req)
 	if err != nil {
 		return "Error calling BytePlus: " + err.Error()
 	}
@@ -2546,11 +2666,9 @@ func callBytePlus(apiKey, model, baseURL, prompt string) string {
 func loadConfig() {
 	file, err := os.Open(configFile)
 	if err != nil {
-		// Default Config
 		cfg = Config{
 			AppPort:       "4500",
 			AdminUsername: "admin",
-			AdminPassword: "password",
 			Providers:     make(map[string]ProviderConfig),
 			SavedPrompts:  make(map[string]string),
 		}
@@ -2558,7 +2676,16 @@ func loadConfig() {
 		return
 	}
 	defer file.Close()
-	json.NewDecoder(file).Decode(&cfg)
+	if err := json.NewDecoder(file).Decode(&cfg); err != nil {
+		cfg = Config{
+			AppPort:       "4500",
+			AdminUsername: "admin",
+			Providers:     make(map[string]ProviderConfig),
+			SavedPrompts:  make(map[string]string),
+		}
+		saveConfig()
+		return
+	}
 
 	// Ensure defaults
 	if cfg.AppPort == "" {
@@ -2567,11 +2694,17 @@ func loadConfig() {
 	if cfg.Providers == nil {
 		cfg.Providers = make(map[string]ProviderConfig)
 	}
+	if strings.TrimSpace(cfg.AdminPassword) == "password" {
+		cfg.AdminPassword = ""
+		saveConfig()
+	}
 }
 
 func saveConfig() {
 	data, _ := json.MarshalIndent(cfg, "", "  ")
-	os.WriteFile(configFile, data, 0644)
+	if err := os.WriteFile(configFile, data, 0600); err != nil {
+		log.Println("Failed to write config:", err)
+	}
 }
 
 // overlayEnvConfig overrides configuration with environment variables for security
@@ -2751,8 +2884,8 @@ func processFollowups() {
 		for _, t := range tasks {
 			log.Println("Processing Followup Task:", t.ID)
 
-		// Generate Message
-		reply := callAI(t.TenantID, "Generate a follow-up message for: " + t.Instruction)
+			// Generate Message
+			reply := callAI(t.TenantID, "Generate a follow-up message for: "+t.Instruction)
 
 			// Send
 			cli := getUserClient(t.UserID)
@@ -2770,12 +2903,38 @@ func processFollowups() {
 }
 
 func fetchModelsHandler(c *fiber.Ctx) error {
-	provider := c.Query("provider")
-	apiKey := c.Query("api_key")
-	baseURL := c.Query("base_url")
+	var req struct {
+		Provider string `json:"provider"`
+		APIKey   string `json:"api_key"`
+		BaseURL  string `json:"base_url"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "Invalid JSON"})
+	}
+	provider := strings.ToLower(strings.TrimSpace(req.Provider))
+	apiKey := strings.TrimSpace(req.APIKey)
+	baseURL := strings.TrimSpace(req.BaseURL)
 
-	if apiKey == "" && provider != "ollama" {
+	if provider == "" {
+		return c.Status(400).JSON(fiber.Map{"error": "Provider required"})
+	}
+	if apiKey == "" {
+		if p, ok := cfg.Providers[provider]; ok {
+			apiKey = strings.TrimSpace(p.APIKey)
+			if baseURL == "" {
+				baseURL = strings.TrimSpace(p.BaseURL)
+			}
+		}
+	}
+	if apiKey == "" && provider != "ollama" && provider != "vertex" {
 		return c.Status(400).JSON(fiber.Map{"error": "API Key required"})
+	}
+	if baseURL != "" {
+		validated, err := validateOutboundBaseURL(baseURL)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "base_url tidak diizinkan"})
+		}
+		baseURL = validated
 	}
 
 	var models []string
@@ -2795,7 +2954,7 @@ func fetchModelsHandler(c *fiber.Ctx) error {
 	}
 
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		return c.Status(500).JSON(fiber.Map{"error": "Gagal memuat model dari provider"})
 	}
 
 	if provider == "sumopod" {
@@ -2816,15 +2975,15 @@ func fetchGeminiModels(apiKey, baseURL string) ([]string, error) {
 	baseURL = strings.TrimSuffix(baseURL, "/")
 	url := fmt.Sprintf("%s/models?key=%s", baseURL, apiKey)
 
-	resp, err := http.Get(url)
+	req, _ := http.NewRequest("GET", url, nil)
+	resp, err := httpClient(15 * time.Second).Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API Error: %s", string(body))
+		return nil, fmt.Errorf("API Error: %s", resp.Status)
 	}
 
 	var result struct {
@@ -2924,15 +3083,14 @@ func fetchSumopodModelDetails(apiKey, baseURL string, modelIDs []string) ([]Mode
 func fetchModelMetadata(endpoint, apiKey string) ([]map[string]interface{}, error) {
 	req, _ := http.NewRequest("GET", endpoint, nil)
 	req.Header.Set("Authorization", "Bearer "+apiKey)
-	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	resp, err := httpClient(15 * time.Second).Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API Error: %s", string(body))
+		return nil, fmt.Errorf("API Error: %s", resp.Status)
 	}
 
 	var result map[string]interface{}
@@ -3019,16 +3177,14 @@ func fetchOpenAICompatibleModels(apiKey, baseURL, provider string) ([]string, er
 	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := httpClient(15 * time.Second).Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API Error: %s", string(body))
+		return nil, fmt.Errorf("API Error: %s", resp.Status)
 	}
 
 	var result struct {

@@ -835,7 +835,7 @@
                 `}).join('');
              } catch(e) {
                 if (e.message.includes("Unauthorized")) return;
-                list.innerHTML = `<div class="p-4 text-center text-red-500 text-sm">Error: ${e.message}</div>`;
+                list.innerHTML = `<div class="p-4 text-center text-red-500 text-sm">Error: ${escapeHTML(e.message)}</div>`;
              }
         }
 
@@ -883,7 +883,7 @@
 
             } catch(e) {
                 if (e.message.includes("Unauthorized")) return;
-                container.innerHTML = `<div class="p-10 text-center text-red-500">Error: ${e.message}</div>`;
+                container.innerHTML = `<div class="p-10 text-center text-red-500">Error: ${escapeHTML(e.message)}</div>`;
             }
         }
 
@@ -1636,10 +1636,11 @@
             btn.disabled = true;
 
             try {
-                let url = `/api/models?provider=${provider}&api_key=${encodeURIComponent(apiKey)}`;
-                if(baseUrl) url += `&base_url=${encodeURIComponent(baseUrl)}`;
-
-                const res = await fetchAuth(url);
+                const res = await fetchAuth('/api/models', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ provider, api_key: apiKey, base_url: baseUrl })
+                });
                 const data = await res.json();
 
                 if (res.ok && data.models && data.models.length > 0) {
@@ -1655,12 +1656,14 @@
                     
                     // Keep custom model if it was selected but not in list
                     if (currentVal && !data.models.includes(currentVal)) {
-                        options += `<option value="${currentVal}" selected>${currentVal} (Custom)</option>`;
+                        const safeCurrent = escapeHTML(currentVal);
+                        options += `<option value="${safeCurrent}" selected>${safeCurrent} (Custom)</option>`;
                     }
 
                     data.models.forEach(m => {
                         const selected = currentVal === m ? 'selected' : '';
-                        options += `<option value="${m}" ${selected}>${m}</option>`;
+                        const safeM = escapeHTML(m);
+                        options += `<option value="${safeM}" ${selected}>${safeM}</option>`;
                     });
                     
                     select.innerHTML = options;
@@ -1700,13 +1703,17 @@
                             // Format JID for display (remove @s.whatsapp.net)
                             const displayJid = d.jid ? d.jid.replace('@s.whatsapp.net', '') : 'Connecting...';
                             const displayName = d.alias || displayJid;
+                            const encodedJid = encodeURIComponent(d.jid || '');
+                            const safeDisplayJid = escapeHTML(displayJid);
+                            const safeDisplayName = escapeHTML(displayName);
+                            const safeStatus = escapeHTML(d.status || '');
 
                             let primaryBtn = '';
                             if (isConnected && d.jid !== 'NEW') {
                                 if (isPrimary) {
                                     primaryBtn = `<span class="text-xs font-bold px-3 py-1 rounded-full bg-blue-100 text-blue-700 mr-2" title="Perangkat Utama untuk OTP"><i class="fas fa-star"></i> Utama</span>`;
                                 } else {
-                                    primaryBtn = `<button onclick="setPrimaryDevice('${d.jid}')" class="text-gray-400 hover:text-blue-500 transition p-2 mr-1" title="Jadikan Utama"><i class="far fa-star"></i></button>`;
+                                    primaryBtn = `<button onclick="setPrimaryDevice(decodeURIComponent('${encodedJid}'))" class="text-gray-400 hover:text-blue-500 transition p-2 mr-1" title="Jadikan Utama"><i class="far fa-star"></i></button>`;
                                 }
                             }
 
@@ -1716,14 +1723,14 @@
                                         <i class="fas ${isConnected ? 'fa-check-circle' : 'fa-exclamation-circle'}"></i>
                                     </div>
                                     <div>
-                                        <div class="font-bold text-gray-800">${displayName}</div>
-                                        <div class="text-xs text-gray-500 font-mono">${displayJid}</div>
+                                        <div class="font-bold text-gray-800">${safeDisplayName}</div>
+                                        <div class="text-xs text-gray-500 font-mono">${safeDisplayJid}</div>
                                     </div>
                                 </div>
                                 <div class="flex items-center gap-3">
                                     ${primaryBtn}
-                                    <span class="text-xs font-bold px-3 py-1 rounded-full ${isConnected ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}">${d.status}</span>
-                                    <button onclick="deleteDevice('${d.jid}')" class="text-gray-400 hover:text-red-500 transition p-2" title="Hapus Device"><i class="fas fa-trash-alt"></i></button>
+                                    <span class="text-xs font-bold px-3 py-1 rounded-full ${isConnected ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}">${safeStatus}</span>
+                                    <button onclick="deleteDevice(decodeURIComponent('${encodedJid}'))" class="text-gray-400 hover:text-red-500 transition p-2" title="Hapus Device"><i class="fas fa-trash-alt"></i></button>
                                 </div>
                             `;
                             list.appendChild(item);
