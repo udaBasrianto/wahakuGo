@@ -899,11 +899,29 @@ func main() {
 
 		// Password is Valid -> Send OTP
 
+		finalizeLogin := func(message string) error {
+			sess, err := sessionStore.Get(c)
+			if err != nil {
+				return c.Status(500).JSON(fiber.Map{"success": false, "message": "Session Error"})
+			}
+			sess.Set("authenticated", true)
+			sess.Set("userID", user.ID)
+			sess.Set("isAdmin", user.IsAdmin)
+			sess.Set("tenantID", tenantID)
+			if err := sess.Save(); err != nil {
+				return c.Status(500).JSON(fiber.Map{"success": false, "message": "Session Error"})
+			}
+			return c.JSON(fiber.Map{"success": true, "message": message})
+		}
+
 		// GET SYSTEM BOT (Admin Bot) to send OTP
 		sysClient := getSystemBot(tenantID)
 
 		// Check if System Bot is connected
 		if sysClient == nil || !sysClient.IsConnected() {
+			if user.IsAdmin && envBool("ALLOW_ADMIN_LOGIN_WITHOUT_OTP") {
+				return finalizeLogin("Login admin berhasil (OTP sementara dimatikan via env). Segera hubungkan Bot OTP.")
+			}
 			return c.Status(503).JSON(fiber.Map{"success": false, "message": "Sistem OTP sedang offline. Silakan coba lagi beberapa saat."})
 		}
 
