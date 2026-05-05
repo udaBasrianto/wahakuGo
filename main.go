@@ -2370,7 +2370,7 @@ func initAdminClient() {
 
 		// Find Admin ID for this tenant
 		var adminID int
-		err := authQueryRow("SELECT id FROM users WHERE is_admin = 1 AND tenant_id = ? LIMIT 1", tenantID).Scan(&adminID)
+		err := authQueryRow("SELECT id FROM users WHERE is_admin = ? AND tenant_id = ? LIMIT 1", true, tenantID).Scan(&adminID)
 		if err != nil {
 			log.Printf("Admin not found for tenant %d\n", tenantID)
 			continue
@@ -2384,14 +2384,14 @@ func initAdminClient() {
 func getSystemBot(tenantID int) *whatsmeow.Client {
 	// Return Admin's client for OTP sending
 	var adminID int
-	err := authQueryRow("SELECT id FROM users WHERE is_admin = 1 AND tenant_id = ? LIMIT 1", tenantID).Scan(&adminID)
+	err := authQueryRow("SELECT id FROM users WHERE is_admin = ? AND tenant_id = ? LIMIT 1", true, tenantID).Scan(&adminID)
 	if err != nil {
 		return nil
 	}
 
 	// 1. Try Primary Device
 	var primaryJID string
-	err = authQueryRow("SELECT device_jid FROM user_devices WHERE user_id = ? AND is_primary = 1 AND tenant_id = ?", adminID, tenantID).Scan(&primaryJID)
+	err = authQueryRow("SELECT device_jid FROM user_devices WHERE user_id = ? AND is_primary = ? AND tenant_id = ?", adminID, true, tenantID).Scan(&primaryJID)
 	if err == nil && primaryJID != "" {
 		if cli := getUserDeviceClient(adminID, primaryJID); cli != nil {
 			return cli
