@@ -803,7 +803,10 @@ func main() {
 				}
 			}
 			// Use default tenant ID already fetched above
-			authExec("INSERT INTO users (username, password, tenant_id, is_admin, is_active) VALUES (?, ?, ?, 1, 1)", cfg.AdminUsername, adminPassword, defaultTenantID)
+			_, err := authExec("INSERT INTO users (username, password, tenant_id, is_admin, is_active) VALUES (?, ?, ?, ?, ?)", cfg.AdminUsername, adminPassword, defaultTenantID, true, true)
+			if err != nil {
+				log.Println("Failed to create initial admin user:", err)
+			}
 		}
 	}
 
@@ -1299,7 +1302,7 @@ func main() {
 			tenantID = 1
 		}
 
-		_, err = authExec("INSERT INTO users (username, email, password, tenant_id, is_admin, is_active) VALUES (?, ?, ?, ?, 0, 0)", req.Username, req.Email, hashedPassword, tenantID)
+		_, err = authExec("INSERT INTO users (username, email, password, tenant_id, is_admin, is_active) VALUES (?, ?, ?, ?, ?, ?)", req.Username, req.Email, hashedPassword, tenantID, false, false)
 		if err != nil {
 			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Nomor WhatsApp atau Email sudah terdaftar"})
 		}
