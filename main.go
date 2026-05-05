@@ -1039,6 +1039,10 @@ func main() {
 			return c.JSON(fiber.Map{"success": true, "message": message})
 		}
 
+		if envBool("DISABLE_OTP") {
+			return finalizeLogin("Login berhasil (OTP dimatikan sementara).")
+		}
+
 		// GET SYSTEM BOT (Admin Bot) to send OTP
 		sysClient := getSystemBot(tenantID)
 
@@ -1100,6 +1104,9 @@ func main() {
 	})
 
 	auth.Post("/verify", func(c *fiber.Ctx) error {
+		if envBool("DISABLE_OTP") {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "OTP sedang dimatikan sementara"})
+		}
 		var req struct {
 			OTP string `json:"otp"`
 		}
@@ -1181,6 +1188,9 @@ func main() {
 
 	// Resend OTP endpoint
 	auth.Post("/resend-otp", func(c *fiber.Ctx) error {
+		if envBool("DISABLE_OTP") {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "OTP sedang dimatikan sementara"})
+		}
 		sess, err := sessionStore.Get(c)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Session Error"})
@@ -1313,6 +1323,11 @@ func main() {
 		_, err = authExec("INSERT INTO users (username, email, password, tenant_id, is_admin, is_active) VALUES (?, ?, ?, ?, ?, ?)", req.Username, req.Email, hashedPassword, tenantID, false, false)
 		if err != nil {
 			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Nomor WhatsApp atau Email sudah terdaftar"})
+		}
+
+		if envBool("DISABLE_OTP") {
+			_, _ = authExec("UPDATE users SET is_active = ? WHERE username = ? AND tenant_id = ?", true, req.Username, tenantID)
+			return c.JSON(fiber.Map{"success": true, "require_otp": false, "message": "Pendaftaran berhasil (OTP dimatikan sementara). Silakan login."})
 		}
 
 		// SEND OTP
