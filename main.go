@@ -882,7 +882,7 @@ func main() {
 		}
 
 		// Whitelist Routes
-		if path == "/login" || path == "/register" || strings.HasPrefix(path, "/api/auth") {
+		if path == "/" || path == "/landing" || path == "/landing.html" || path == "/login" || path == "/register" || strings.HasPrefix(path, "/api/auth") {
 			return c.Next()
 		}
 
@@ -921,6 +921,9 @@ func main() {
 	os.MkdirAll("uploads", 0755)
 
 	// Serve Static Files
+	app.Get("/", func(c *fiber.Ctx) error {
+		return c.SendFile("./views/landing.html")
+	})
 	app.Get("/login", func(c *fiber.Ctx) error {
 		return c.SendFile("./views/login.html")
 	})
