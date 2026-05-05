@@ -1967,6 +1967,93 @@ func main() {
 		return c.JSON(fiber.Map{"success": true, "contacts": contacts})
 	})
 
+	type ChatLogEntry struct {
+		Role      string `json:"role"`
+		Message   string `json:"message"`
+		Timestamp int64  `json:"timestamp"`
+	}
+
+	api.Get("/chat-logs", func(c *fiber.Ctx) error {
+		userID := c.Locals("userID").(int)
+		jid := c.Query("jid")
+		if strings.TrimSpace(jid) == "" {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "jid wajib diisi"})
+		}
+
+		key := fmt.Sprintf("%d:%s", userID, jid)
+
+		historyMutex.Lock()
+		lines := append([]string(nil), chatHistories[key]...)
+		historyMutex.Unlock()
+
+		now := time.Now()
+		logs := make([]ChatLogEntry, 0, len(lines))
+		for i, line := range lines {
+			raw := strings.TrimSpace(line)
+			role := "assistant"
+			msg := raw
+			if strings.HasPrefix(raw, "User:") {
+				role = "user"
+				msg = strings.TrimSpace(strings.TrimPrefix(raw, "User:"))
+			} else if strings.HasPrefix(raw, "Assistant:") {
+				role = "assistant"
+				msg = strings.TrimSpace(strings.TrimPrefix(raw, "Assistant:"))
+			}
+			ts := now.Add(-time.Duration(len(lines)-i) * time.Second).UnixMilli()
+			logs = append(logs, ChatLogEntry{Role: role, Message: msg, Timestamp: ts})
+		}
+
+		return c.JSON(fiber.Map{"success": true, "logs": logs})
+	})
+
+	api.Delete("/chat-logs", func(c *fiber.Ctx) error {
+		userID := c.Locals("userID").(int)
+		jid := c.Query("jid")
+		if strings.TrimSpace(jid) == "" {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "jid wajib diisi"})
+		}
+
+		key := fmt.Sprintf("%d:%s", userID, jid)
+
+		historyMutex.Lock()
+		delete(chatHistories, key)
+		historyMutex.Unlock()
+
+		return c.JSON(fiber.Map{"success": true})
+	})
+
+	api.Post("/reset-memory", func(c *fiber.Ctx) error {
+		userID := c.Locals("userID").(int)
+		var req struct {
+			Target string `json:"target"`
+			JID    string `json:"jid"`
+		}
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid JSON"})
+		}
+
+		historyMutex.Lock()
+		defer historyMutex.Unlock()
+
+		if req.Target == "all_chats" || strings.TrimSpace(req.Target) == "" {
+			prefix := fmt.Sprintf("%d:", userID)
+			for k := range chatHistories {
+				if strings.HasPrefix(k, prefix) {
+					delete(chatHistories, k)
+				}
+			}
+			return c.JSON(fiber.Map{"success": true})
+		}
+
+		if strings.TrimSpace(req.JID) != "" {
+			key := fmt.Sprintf("%d:%s", userID, req.JID)
+			delete(chatHistories, key)
+			return c.JSON(fiber.Map{"success": true})
+		}
+
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "target tidak dikenal"})
+	})
+
 	// Test AI
 	api.Post("/test-ai", func(c *fiber.Ctx) error {
 		var req struct {
