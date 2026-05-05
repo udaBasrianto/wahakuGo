@@ -707,8 +707,14 @@ func main() {
 	if err := initAuthSchema(); err != nil {
 		log.Fatal("Failed to init auth schema:", err)
 	}
+	log.Println("Auth storage dialect:", authDialect)
 
 	if authDialect == "sqlite" {
+		ensureColumn(authDB, "users", "tenant_id", "ALTER TABLE users ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1")
+		ensureColumn(authDB, "user_devices", "tenant_id", "ALTER TABLE user_devices ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1")
+		ensureColumn(authDB, "followup_tasks", "tenant_id", "ALTER TABLE followup_tasks ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1")
+		ensureColumn(authDB, "tenant_knowledge_files", "tenant_id", "ALTER TABLE tenant_knowledge_files ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1")
+
 		var emailColCount int
 		authQueryRow("SELECT COUNT(*) FROM pragma_table_info('users') WHERE name='email'").Scan(&emailColCount)
 		if emailColCount == 0 {
