@@ -427,6 +427,7 @@ func tenantMiddleware(c *fiber.Ctx) error {
 	var exists bool
 	err = authDB.QueryRow("SELECT EXISTS(SELECT 1 FROM tenants WHERE id = ?)", tenantID).Scan(&exists)
 	if err != nil {
+		log.Println("Tenant lookup database error:", err)
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Database error"})
 	}
 	if !exists {
@@ -859,6 +860,7 @@ func main() {
 		if err == sql.ErrNoRows {
 			return c.Status(401).JSON(fiber.Map{"success": false, "message": "User tidak ditemukan"})
 		} else if err != nil {
+			log.Println("Login database error:", err)
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Database Error"})
 		}
 
