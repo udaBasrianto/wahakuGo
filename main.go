@@ -282,6 +282,17 @@ func envBool(name string) bool {
 	return val == "1" || val == "true" || val == "yes" || val == "y" || val == "on"
 }
 
+func normalizeWhatsAppNumber(input string) string {
+	n := strings.TrimSpace(input)
+	n = strings.TrimPrefix(n, "+")
+	n = strings.ReplaceAll(n, " ", "")
+	n = strings.ReplaceAll(n, "-", "")
+	if strings.HasPrefix(n, "0") && len(n) > 1 {
+		n = "62" + strings.TrimPrefix(n, "0")
+	}
+	return n
+}
+
 func otpDisabled() bool {
 	if envBool("FORCE_DISABLE_OTP") {
 		return true
@@ -1226,9 +1237,9 @@ func main() {
 
 		// Send OTP asynchronously (non-blocking)
 		go func() {
-			targetNumber := strings.TrimSpace(user.WhatsApp)
+			targetNumber := normalizeWhatsAppNumber(user.WhatsApp)
 			if targetNumber == "" {
-				targetNumber = strings.TrimSpace(user.Username)
+				targetNumber = normalizeWhatsAppNumber(user.Username)
 			}
 			if targetNumber == "" || strings.Contains(targetNumber, "@") || len(targetNumber) < 10 {
 				log.Printf("Failed to send async OTP: nomor WhatsApp belum valid (username=%s whatsapp_number=%s)", user.Username, user.WhatsApp)
@@ -1244,15 +1255,23 @@ func main() {
 				Conversation: proto.String("🔐 Kode Login Wahaku Dashboard: *" + otp + "*\n\nJangan berikan kode ini kepada siapapun."),
 			}
 
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer cancel()
+			send := func(timeout time.Duration) error {
+				ctx, cancel := context.WithTimeout(context.Background(), timeout)
+				defer cancel()
+				_, err := sysClient.SendMessage(ctx, targetJID, msg)
+				return err
+			}
 
-			_, err := sysClient.SendMessage(ctx, targetJID, msg)
+			err := send(45 * time.Second)
+			if err != nil && strings.Contains(strings.ToLower(err.Error()), "context deadline exceeded") {
+				time.Sleep(600 * time.Millisecond)
+				err = send(45 * time.Second)
+			}
 			if err != nil {
 				log.Printf("Failed to send async OTP to %s: %v", targetNumber, err)
-			} else {
-				log.Printf("OTP sent async to %s", targetNumber)
+				return
 			}
+			log.Printf("OTP sent async to %s", targetNumber)
 		}()
 
 		return c.JSON(fiber.Map{"success": true, "require_otp": true, "message": "OTP dikirim ke WhatsApp"})
@@ -1397,9 +1416,13 @@ func main() {
 
 		// Send OTP asynchronously (non-blocking)
 		go func() {
-			targetNumber := user.WhatsApp
-			if strings.TrimSpace(targetNumber) == "" {
-				targetNumber = user.Username
+			targetNumber := normalizeWhatsAppNumber(user.WhatsApp)
+			if targetNumber == "" {
+				targetNumber = normalizeWhatsAppNumber(user.Username)
+			}
+			if targetNumber == "" || strings.Contains(targetNumber, "@") || len(targetNumber) < 10 {
+				log.Printf("Failed to send resend OTP: nomor WhatsApp belum valid (username=%s whatsapp_number=%s)", user.Username, user.WhatsApp)
+				return
 			}
 			targetJID := types.NewJID(targetNumber, types.DefaultUserServer)
 			if sysClient.Store.ID != nil && targetJID.User == sysClient.Store.ID.User {
@@ -1411,15 +1434,23 @@ func main() {
 				Conversation: proto.String("🔐 Kode Verifikasi (Ulang): *" + otp + "*\n\nMasukkan kode ini untuk menyelesaikan verifikasi."),
 			}
 
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer cancel()
-
-			_, err := sysClient.SendMessage(ctx, targetJID, msg)
-			if err != nil {
-				log.Printf("Failed to send resend OTP to %s: %v", user.Username, err)
-			} else {
-				log.Printf("OTP resent to %s", user.Username)
+			send := func(timeout time.Duration) error {
+				ctx, cancel := context.WithTimeout(context.Background(), timeout)
+				defer cancel()
+				_, err := sysClient.SendMessage(ctx, targetJID, msg)
+				return err
 			}
+
+			err := send(45 * time.Second)
+			if err != nil && strings.Contains(strings.ToLower(err.Error()), "context deadline exceeded") {
+				time.Sleep(600 * time.Millisecond)
+				err = send(45 * time.Second)
+			}
+			if err != nil {
+				log.Printf("Failed to send resend OTP to %s: %v", targetNumber, err)
+				return
+			}
+			log.Printf("OTP resent to %s", targetNumber)
 		}()
 
 		return c.JSON(fiber.Map{"success": true, "message": "Kode OTP baru telah dikirim"})
@@ -1455,6 +1486,7 @@ func main() {
 			}
 		}
 
+		req.Username = normalizeWhatsAppNumber(req.Username)
 		if len(req.Username) < 10 {
 			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Nomor WhatsApp tidak valid (Wajib)"})
 		}
@@ -1520,7 +1552,12 @@ func main() {
 
 		// Send OTP asynchronously (non-blocking)
 		go func() {
-			targetJID := types.NewJID(req.Username, types.DefaultUserServer)
+			targetNumber := normalizeWhatsAppNumber(req.Username)
+			if targetNumber == "" || strings.Contains(targetNumber, "@") || len(targetNumber) < 10 {
+				log.Printf("Failed to send OTP for registration: nomor WhatsApp belum valid (username=%s)", req.Username)
+				return
+			}
+			targetJID := types.NewJID(targetNumber, types.DefaultUserServer)
 			if sysClient.Store.ID != nil && targetJID.User == sysClient.Store.ID.User {
 				targetJID = *sysClient.Store.ID
 				targetJID.Device = 0
@@ -1530,15 +1567,23 @@ func main() {
 				Conversation: proto.String("🔐 Kode Verifikasi Pendaftaran Wahaku: *" + otp + "*\n\nMasukkan kode ini untuk menyelesaikan pendaftaran."),
 			}
 
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer cancel()
-
-			_, err := sysClient.SendMessage(ctx, targetJID, msg)
-			if err != nil {
-				log.Printf("Failed to send OTP for registration to %s: %v", req.Username, err)
-			} else {
-				log.Printf("Registration OTP sent to %s", req.Username)
+			send := func(timeout time.Duration) error {
+				ctx, cancel := context.WithTimeout(context.Background(), timeout)
+				defer cancel()
+				_, err := sysClient.SendMessage(ctx, targetJID, msg)
+				return err
 			}
+
+			err := send(45 * time.Second)
+			if err != nil && strings.Contains(strings.ToLower(err.Error()), "context deadline exceeded") {
+				time.Sleep(600 * time.Millisecond)
+				err = send(45 * time.Second)
+			}
+			if err != nil {
+				log.Printf("Failed to send OTP for registration to %s: %v", targetNumber, err)
+				return
+			}
+			log.Printf("Registration OTP sent to %s", targetNumber)
 		}()
 
 		return c.JSON(fiber.Map{"success": true, "require_otp": true, "message": "Pendaftaran berhasil. Masukkan kode OTP yang dikirim ke WhatsApp."})
@@ -1913,7 +1958,7 @@ func main() {
 			return c.Status(400).JSON(fiber.Map{"error": "Invalid JSON"})
 		}
 		req.Username = strings.TrimSpace(req.Username)
-		req.WhatsApp = strings.TrimSpace(req.WhatsApp)
+		req.WhatsApp = normalizeWhatsAppNumber(req.WhatsApp)
 		req.Email = strings.TrimSpace(req.Email)
 		if req.Username == "" {
 			return c.Status(400).JSON(fiber.Map{"error": "Username cannot be empty"})
