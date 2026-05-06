@@ -5088,7 +5088,8 @@ func fetchModelsHandler(c *fiber.Ctx) error {
 	}
 
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": "Gagal memuat model dari provider"})
+		log.Printf("[MODELS] provider=%s baseURL=%s err=%v", provider, baseURL, err)
+		return c.Status(500).JSON(fiber.Map{"error": "Gagal memuat model dari provider: " + err.Error()})
 	}
 
 	if provider == "sumopod" {
