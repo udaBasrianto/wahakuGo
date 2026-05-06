@@ -333,6 +333,14 @@ func initAuthSchema() error {
 				updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 				PRIMARY KEY (tenant_id, user_id)
 			)`,
+			`CREATE TABLE IF NOT EXISTS user_ai_settings (
+				tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+				user_id INTEGER NOT NULL REFERENCES users(id),
+				active_provider TEXT NOT NULL DEFAULT '',
+				providers_json TEXT NOT NULL DEFAULT '{}',
+				updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+				PRIMARY KEY (tenant_id, user_id)
+			)`,
 			`CREATE TABLE IF NOT EXISTS user_devices (
 				id SERIAL PRIMARY KEY,
 				tenant_id INTEGER NOT NULL DEFAULT 1 REFERENCES tenants(id),
@@ -395,6 +403,16 @@ func initAuthSchema() error {
 		tenant_id INTEGER NOT NULL DEFAULT 1,
 		user_id INTEGER NOT NULL,
 		system_prompt TEXT DEFAULT '',
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY(tenant_id) REFERENCES tenants(id),
+		FOREIGN KEY(user_id) REFERENCES users(id),
+		UNIQUE(tenant_id, user_id)
+	);
+	CREATE TABLE IF NOT EXISTS user_ai_settings (
+		tenant_id INTEGER NOT NULL DEFAULT 1,
+		user_id INTEGER NOT NULL,
+		active_provider TEXT DEFAULT '',
+		providers_json TEXT DEFAULT '{}',
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY(tenant_id) REFERENCES tenants(id),
 		FOREIGN KEY(user_id) REFERENCES users(id),
@@ -466,6 +484,62 @@ func setUserSystemPrompt(userID, tenantID int, prompt string) error {
 		 VALUES (?, ?, ?, CURRENT_TIMESTAMP)
 		 ON CONFLICT(tenant_id, user_id) DO UPDATE SET system_prompt = excluded.system_prompt, updated_at = CURRENT_TIMESTAMP`,
 		tenantID, userID, prompt,
+	)
+	return err
+}
+
+type UserAIConfig struct {
+	ActiveProvider string                    `json:"active_provider"`
+	Providers      map[string]ProviderConfig `json:"providers"`
+}
+
+func getUserAIConfig(userID, tenantID int) (UserAIConfig, bool) {
+	var activeProvider string
+	var providersJSON string
+	err := authQueryRow("SELECT COALESCE(active_provider, ''), COALESCE(providers_json, '{}') FROM user_ai_settings WHERE user_id = ? AND tenant_id = ?", userID, tenantID).Scan(&activeProvider, &providersJSON)
+	if err != nil {
+		return UserAIConfig{}, false
+	}
+
+	providers := map[string]ProviderConfig{}
+	if strings.TrimSpace(providersJSON) != "" {
+		_ = json.Unmarshal([]byte(providersJSON), &providers)
+	}
+	if providers == nil {
+		providers = map[string]ProviderConfig{}
+	}
+
+	return UserAIConfig{
+		ActiveProvider: strings.TrimSpace(activeProvider),
+		Providers:      providers,
+	}, true
+}
+
+func setUserAIConfig(userID, tenantID int, cfg UserAIConfig) error {
+	cfg.ActiveProvider = strings.TrimSpace(cfg.ActiveProvider)
+	if cfg.Providers == nil {
+		cfg.Providers = map[string]ProviderConfig{}
+	}
+	raw, err := json.Marshal(cfg.Providers)
+	if err != nil {
+		return err
+	}
+
+	if authDialect == "postgres" {
+		_, err := authExec(
+			`INSERT INTO user_ai_settings (tenant_id, user_id, active_provider, providers_json, updated_at)
+			 VALUES (?, ?, ?, ?, NOW())
+			 ON CONFLICT (tenant_id, user_id) DO UPDATE SET active_provider = EXCLUDED.active_provider, providers_json = EXCLUDED.providers_json, updated_at = NOW()`,
+			tenantID, userID, cfg.ActiveProvider, string(raw),
+		)
+		return err
+	}
+
+	_, err = authExec(
+		`INSERT INTO user_ai_settings (tenant_id, user_id, active_provider, providers_json, updated_at)
+		 VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+		 ON CONFLICT(tenant_id, user_id) DO UPDATE SET active_provider = excluded.active_provider, providers_json = excluded.providers_json, updated_at = CURRENT_TIMESTAMP`,
+		tenantID, userID, cfg.ActiveProvider, string(raw),
 	)
 	return err
 }
@@ -2082,6 +2156,84 @@ func main() {
 		return c.JSON(fiber.Map{"success": true})
 	})
 
+	api.Get("/user/ai-config", func(c *fiber.Ctx) error {
+		userID := c.Locals("userID").(int)
+		tenantID := c.Locals("tenantID").(int)
+		cfg, ok := getUserAIConfig(userID, tenantID)
+		if !ok {
+			cfg = UserAIConfig{ActiveProvider: "", Providers: map[string]ProviderConfig{}}
+		}
+		return c.JSON(fiber.Map{
+			"success":         true,
+			"active_provider": cfg.ActiveProvider,
+			"providers":       cfg.Providers,
+		})
+	})
+
+	api.Post("/user/ai-config", func(c *fiber.Ctx) error {
+		userID := c.Locals("userID").(int)
+		tenantID := c.Locals("tenantID").(int)
+		var req UserAIConfig
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid JSON"})
+		}
+
+		req.ActiveProvider = strings.TrimSpace(req.ActiveProvider)
+		if req.Providers == nil {
+			req.Providers = map[string]ProviderConfig{}
+		}
+
+		allowed := map[string]bool{
+			"gemini":   true,
+			"vertex":   true,
+			"openai":   true,
+			"sumopod":  true,
+			"groq":     true,
+			"qwen":     true,
+			"byteplus": true,
+			"deepseek": true,
+		}
+		for k := range req.Providers {
+			if !allowed[k] {
+				delete(req.Providers, k)
+			}
+		}
+
+		for name, p := range req.Providers {
+			if strings.TrimSpace(p.BaseURL) != "" && name != "vertex" {
+				validated, err := validateOutboundBaseURL(p.BaseURL)
+				if err != nil {
+					return c.Status(400).JSON(fiber.Map{"success": false, "message": "base_url tidak diizinkan"})
+				}
+				p.BaseURL = validated
+				req.Providers[name] = p
+			}
+		}
+
+		if req.ActiveProvider == "" {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Active provider wajib dipilih"})
+		}
+		if !allowed[req.ActiveProvider] {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Provider tidak valid"})
+		}
+		p, ok := req.Providers[req.ActiveProvider]
+		if !ok {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Konfigurasi provider belum ada"})
+		}
+		if strings.TrimSpace(p.APIKey) == "" {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "API Key wajib diisi"})
+		}
+		if strings.TrimSpace(p.Model) == "" {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Model wajib dipilih"})
+		}
+
+		if err := setUserAIConfig(userID, tenantID, req); err != nil {
+			log.Println("Failed to save user ai config:", err)
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Gagal menyimpan konfigurasi AI"})
+		}
+		return c.JSON(fiber.Map{"success": true})
+	})
+
 	type ChatLogEntry struct {
 		Role      string `json:"role"`
 		Message   string `json:"message"`
@@ -2182,13 +2334,14 @@ func main() {
 		if prompt == "" {
 			prompt = req.Message
 		}
-		providerName, _, cfgErr := getActiveProviderConfig()
+		userID := c.Locals("userID").(int)
+		tenantID := c.Locals("tenantID").(int)
+		isAdmin, _ := c.Locals("isAdmin").(bool)
+		providerName, _, cfgErr := getActiveProviderConfig(userID, tenantID, isAdmin)
 		if cfgErr != "" {
 			return c.Status(400).JSON(fiber.Map{"success": false, "message": cfgErr, "provider": providerName})
 		}
-		userID := c.Locals("userID").(int)
-		tenantID := c.Locals("tenantID").(int)
-		reply := callAI(userID, tenantID, prompt)
+		reply := callAI(userID, tenantID, isAdmin, prompt)
 		return c.JSON(fiber.Map{"success": true, "reply": reply, "provider": providerName})
 	})
 
@@ -2442,7 +2595,7 @@ func main() {
 		return c.JSON(fiber.Map{"success": true})
 	})
 
-	api.Post("/models", requireAdmin, fetchModelsHandler)
+	api.Post("/models", fetchModelsHandler)
 	api.Get("/public/branding", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{
 			"success": true,
@@ -2710,10 +2863,12 @@ func handleUserEvent(userID int, cli *whatsmeow.Client, evt interface{}) {
 
 			// Get tenant ID for this user
 			var tenantID int
-			err := authQueryRow("SELECT tenant_id FROM users WHERE id = ?", userID).Scan(&tenantID)
+			var isAdmin bool
+			err := authQueryRow("SELECT tenant_id, COALESCE(is_admin, FALSE) FROM users WHERE id = ?", userID).Scan(&tenantID, &isAdmin)
 			if err != nil {
 				log.Println("Error getting tenant for user", userID, ":", err)
 				tenantID = 1 // fallback
+				isAdmin = false
 			}
 
 			// Send typing indicator to WhatsApp
@@ -2730,7 +2885,7 @@ func handleUserEvent(userID int, cli *whatsmeow.Client, evt interface{}) {
 			log.Printf("[User %d] Waiting %v before replying...", userID, delaySeconds)
 			time.Sleep(delaySeconds)
 
-			reply := callAI(userID, tenantID, msg)
+			reply := callAI(userID, tenantID, isAdmin, msg)
 			log.Printf("[User %d] AI Reply generated (len=%d)", userID, len(reply))
 
 			historyMutex.Lock()
@@ -2823,7 +2978,30 @@ func handleUserEvent(userID int, cli *whatsmeow.Client, evt interface{}) {
 	}
 }
 
-func getActiveProviderConfig() (string, ProviderConfig, string) {
+func getActiveProviderConfig(userID, tenantID int, isAdmin bool) (string, ProviderConfig, string) {
+	userCfg, ok := getUserAIConfig(userID, tenantID)
+	if ok {
+		providerName := strings.TrimSpace(userCfg.ActiveProvider)
+		if providerName == "" {
+			return "", ProviderConfig{}, "AI untuk akun ini belum dikonfigurasi (Active Provider kosong). Buka AI Brain dan pilih provider."
+		}
+		pConfig, exists := userCfg.Providers[providerName]
+		if !exists {
+			return providerName, ProviderConfig{}, "AI untuk akun ini belum dikonfigurasi untuk provider '" + providerName + "'."
+		}
+		if strings.TrimSpace(pConfig.APIKey) == "" {
+			return providerName, ProviderConfig{}, "API Key untuk akun ini masih kosong. Isi API Key di AI Brain lalu Simpan."
+		}
+		if strings.TrimSpace(pConfig.Model) == "" {
+			return providerName, ProviderConfig{}, "Model untuk akun ini masih kosong. Pilih Model di AI Brain lalu Simpan."
+		}
+		return providerName, pConfig, ""
+	}
+
+	if !isAdmin {
+		return "", ProviderConfig{}, "AI untuk akun ini belum dikonfigurasi. Buka AI Brain → isi API Key dan Model → Simpan."
+	}
+
 	mu.Lock()
 	providerName := cfg.ActiveProvider
 	providers := cfg.Providers
@@ -2836,8 +3014,8 @@ func getActiveProviderConfig() (string, ProviderConfig, string) {
 		return providerName, ProviderConfig{}, "AI belum dikonfigurasi. Buka Dashboard → AI Brain → isi API Key dan Model."
 	}
 
-	pConfig, ok := providers[providerName]
-	if !ok {
+	pConfig, ok2 := providers[providerName]
+	if !ok2 {
 		return providerName, ProviderConfig{}, "AI belum dikonfigurasi untuk provider '" + providerName + "'. Buka Dashboard → AI Brain dan pilih provider yang benar."
 	}
 	if strings.TrimSpace(pConfig.APIKey) == "" {
@@ -2850,7 +3028,7 @@ func getActiveProviderConfig() (string, ProviderConfig, string) {
 	return providerName, pConfig, ""
 }
 
-func callAI(userID, tenantID int, prompt string) string {
+func callAI(userID, tenantID int, isAdmin bool, prompt string) string {
 	const MaxInputLength = 4000
 	if len(prompt) > MaxInputLength {
 		prompt = prompt[:MaxInputLength]
@@ -2867,9 +3045,11 @@ func callAI(userID, tenantID int, prompt string) string {
 
 	sysPrompt := getUserSystemPrompt(userID, tenantID)
 	if sysPrompt == "" {
-		mu.Lock()
-		sysPrompt = cfg.SystemPrompt
-		mu.Unlock()
+		if isAdmin {
+			mu.Lock()
+			sysPrompt = cfg.SystemPrompt
+			mu.Unlock()
+		}
 	}
 	if sysPrompt == "" {
 		sysPrompt = "You are a helpful assistant."
@@ -2877,8 +3057,7 @@ func callAI(userID, tenantID int, prompt string) string {
 
 	fullPrompt := fmt.Sprintf("%s\n\nContext:\n%s\n\nUser Question: %s", sysPrompt, contextText, prompt)
 
-	// 3. Choose Provider (global config)
-	providerName, pConfig, cfgErr := getActiveProviderConfig()
+	providerName, pConfig, cfgErr := getActiveProviderConfig(userID, tenantID, isAdmin)
 	if cfgErr != "" {
 		return cfgErr
 	}
@@ -3318,7 +3497,9 @@ func processFollowups() {
 			log.Println("Processing Followup Task:", t.ID)
 
 			// Generate Message
-			reply := callAI(t.UserID, t.TenantID, "Generate a follow-up message for: "+t.Instruction)
+			var isAdmin bool
+			_ = authQueryRow("SELECT COALESCE(is_admin, FALSE) FROM users WHERE id = ? AND tenant_id = ?", t.UserID, t.TenantID).Scan(&isAdmin)
+			reply := callAI(t.UserID, t.TenantID, isAdmin, "Generate a follow-up message for: "+t.Instruction)
 
 			// Send
 			cli := getUserClient(t.UserID)
@@ -3336,6 +3517,7 @@ func processFollowups() {
 }
 
 func fetchModelsHandler(c *fiber.Ctx) error {
+	isAdmin, _ := c.Locals("isAdmin").(bool)
 	var req struct {
 		Provider string `json:"provider"`
 		APIKey   string `json:"api_key"`
@@ -3352,6 +3534,9 @@ func fetchModelsHandler(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"error": "Provider required"})
 	}
 	if apiKey == "" {
+		if !isAdmin {
+			return c.Status(400).JSON(fiber.Map{"error": "API Key required"})
+		}
 		if p, ok := cfg.Providers[provider]; ok {
 			apiKey = strings.TrimSpace(p.APIKey)
 			if baseURL == "" {
@@ -3362,7 +3547,7 @@ func fetchModelsHandler(c *fiber.Ctx) error {
 	if apiKey == "" && provider != "ollama" && provider != "vertex" {
 		return c.Status(400).JSON(fiber.Map{"error": "API Key required"})
 	}
-	if baseURL != "" {
+	if baseURL != "" && provider != "vertex" {
 		validated, err := validateOutboundBaseURL(baseURL)
 		if err != nil {
 			return c.Status(400).JSON(fiber.Map{"error": "base_url tidak diizinkan"})

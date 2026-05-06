@@ -1069,6 +1069,16 @@
                             }
                         }
                     } catch (e) {}
+                    try {
+                        const res = await fetchAuth('/api/user/ai-config');
+                        if (res.ok) {
+                            const data = await res.json();
+                            if (data && data.success) {
+                                if (typeof data.active_provider === 'string') currentConfig.active_provider = data.active_provider;
+                                if (data.providers && typeof data.providers === 'object') currentConfig.providers = data.providers;
+                            }
+                        }
+                    } catch (e) {}
                 }
                 currentIsAdmin = isAdmin;
                 
@@ -1967,6 +1977,14 @@
             // Gather Data
             currentConfig.system_prompt = document.getElementById('system_prompt').value;
             if (!currentIsAdmin) {
+                Object.keys(currentConfig.providers || {}).forEach(key => {
+                    const apiKeyEl = document.getElementById(`apikey-${key}`);
+                    const modelEl = document.getElementById(`model-${key}`);
+                    const baseUrlEl = document.getElementById(`baseurl-${key}`);
+                    if(apiKeyEl) currentConfig.providers[key].api_key = apiKeyEl.value;
+                    if(modelEl) currentConfig.providers[key].model = modelEl.value;
+                    if(baseUrlEl) currentConfig.providers[key].base_url = baseUrlEl.value;
+                });
                 try {
                     const res = await fetchAuth('/api/user/config', {
                         method: 'POST',
@@ -1976,6 +1994,15 @@
                     const data = await res.json();
                     if (!res.ok || !data.success) {
                         throw new Error(data.message || data.error || 'Gagal menyimpan');
+                    }
+                    const res2 = await fetchAuth('/api/user/ai-config', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ active_provider: currentConfig.active_provider, providers: currentConfig.providers })
+                    });
+                    const data2 = await res2.json();
+                    if (!res2.ok || !data2.success) {
+                        throw new Error(data2.message || data2.error || 'Gagal menyimpan konfigurasi AI');
                     }
                     Swal.fire('Berhasil', 'Prompt Anda disimpan', 'success');
                 } catch (e) {
@@ -1990,8 +2017,10 @@
             Object.keys(currentConfig.providers).forEach(key => {
                 const apiKeyEl = document.getElementById(`apikey-${key}`);
                 const modelEl = document.getElementById(`model-${key}`);
+                const baseUrlEl = document.getElementById(`baseurl-${key}`);
                 if(apiKeyEl) currentConfig.providers[key].api_key = apiKeyEl.value;
                 if(modelEl) currentConfig.providers[key].model = modelEl.value;
+                if(baseUrlEl) currentConfig.providers[key].base_url = baseUrlEl.value;
             });
             
             // Gather DB & Sheet
