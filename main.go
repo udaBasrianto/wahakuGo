@@ -871,8 +871,8 @@ func validateOutboundBaseURL(raw string) (string, error) {
 		}
 	}
 	port := u.Port()
-	if port != "" && port != "443" && !envBool("ALLOW_NONSTANDARD_OUTBOUND_PORTS") {
-		return "", fmt.Errorf("base_url port tidak diizinkan")
+	if port != "" && port != "443" && port != "80" && !envBool("ALLOW_NONSTANDARD_OUTBOUND_PORTS") {
+		return "", fmt.Errorf("base_url port tidak diizinkan (gunakan port 443/80 atau set ALLOW_NONSTANDARD_OUTBOUND_PORTS=true)")
 	}
 	u.Path = strings.TrimSuffix(u.Path, "/")
 	return u.String(), nil
@@ -3466,7 +3466,8 @@ func main() {
 			if strings.TrimSpace(p.BaseURL) != "" && name != "vertex" {
 				validated, err := validateOutboundBaseURL(p.BaseURL)
 				if err != nil {
-					return c.Status(400).JSON(fiber.Map{"success": false, "message": "base_url tidak diizinkan"})
+					log.Printf("[AI-CONFIG] base_url validation failed for provider=%s url=%s err=%v", name, p.BaseURL, err)
+					return c.Status(400).JSON(fiber.Map{"success": false, "message": fmt.Sprintf("base_url provider '%s' tidak diizinkan: %s", name, err.Error())})
 				}
 				p.BaseURL = validated
 				req.Providers[name] = p
@@ -3477,17 +3478,17 @@ func main() {
 			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Active provider wajib dipilih"})
 		}
 		if !allowed[req.ActiveProvider] {
-			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Provider tidak valid"})
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Provider tidak valid: " + req.ActiveProvider})
 		}
 		p, ok := req.Providers[req.ActiveProvider]
 		if !ok {
-			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Konfigurasi provider belum ada"})
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Konfigurasi provider '" + req.ActiveProvider + "' belum ada"})
 		}
 		if strings.TrimSpace(p.APIKey) == "" {
-			return c.Status(400).JSON(fiber.Map{"success": false, "message": "API Key wajib diisi"})
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "API Key wajib diisi untuk provider " + req.ActiveProvider})
 		}
 		if strings.TrimSpace(p.Model) == "" {
-			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Model wajib dipilih"})
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Model wajib dipilih untuk provider " + req.ActiveProvider})
 		}
 
 		if err := setUserAIConfig(userID, tenantID, req); err != nil {
