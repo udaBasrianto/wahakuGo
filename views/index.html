@@ -111,6 +111,10 @@
                     <i class="fas fa-user-circle w-5 text-center"></i>
                     <span class="font-medium text-sm">Profil Saya</span>
                 </button>
+                <button id="nav-billing" onclick="showSection('billing')" class="nav-item w-full text-left flex items-center gap-3 px-3 py-2.5 rounded-lg text-gray-600 hover:bg-blue-50 hover:text-blue-700 transition-colors">
+                    <i class="fas fa-credit-card w-5 text-center"></i>
+                    <span class="font-medium text-sm">Langganan</span>
+                </button>
                 <button id="nav-users" onclick="showSection('users')" class="nav-item hidden w-full text-left flex items-center gap-3 px-3 py-2.5 rounded-lg text-gray-600 hover:bg-blue-50 hover:text-blue-700 transition-colors">
                     <i class="fas fa-users w-5 text-center"></i>
                     <span class="font-medium text-sm">Kelola User</span>
@@ -608,6 +612,55 @@
                     </div>
                 </div>
 
+                <!-- SECTION: BILLING -->
+                <div id="section-billing" class="section-content hidden space-y-6">
+                    <div class="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 max-w-4xl">
+                        <div class="flex items-center justify-between mb-5">
+                            <h3 class="text-lg font-bold text-gray-800"><i class="fas fa-credit-card text-blue-500 mr-2"></i> Langganan</h3>
+                            <button onclick="loadBilling()" class="text-blue-600 hover:bg-blue-50 px-3 py-2 rounded-lg transition text-sm font-semibold">
+                                <i class="fas fa-sync-alt mr-2"></i> Refresh
+                            </button>
+                        </div>
+                        <div id="billing-status" class="text-sm text-gray-600">Memuat status...</div>
+                    </div>
+
+                    <div class="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 max-w-4xl">
+                        <h4 class="text-sm font-bold text-gray-700 mb-4">Perpanjang via Transfer Bank</h4>
+                        <div id="billing-bank" class="text-sm text-gray-700 space-y-1"></div>
+                        <div class="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">Pilih Paket</label>
+                                <select id="billing-plan" class="w-full p-3 bg-gray-50 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"></select>
+                                <p class="text-xs text-gray-400 mt-1">Klik Buat Invoice lalu transfer sesuai nominal.</p>
+                            </div>
+                            <div class="flex items-end">
+                                <button onclick="createInvoice()" class="w-full bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 rounded-lg font-medium shadow-md transition">
+                                    <i class="fas fa-receipt mr-2"></i> Buat Invoice
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="mt-8 border-t pt-6">
+                            <h4 class="text-sm font-bold text-gray-700 mb-3">Upload Bukti Transfer</h4>
+                            <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                <input id="billing-invoice-id" type="number" min="1" placeholder="ID Invoice" class="w-full p-3 bg-gray-50 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                                <input id="billing-proof-file" type="file" accept=".png,.jpg,.jpeg,.pdf" class="w-full p-3 bg-gray-50 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                                <button onclick="uploadProof()" class="w-full bg-green-600 hover:bg-green-700 text-white px-6 py-3 rounded-lg font-medium shadow-md transition">
+                                    <i class="fas fa-upload mr-2"></i> Upload
+                                </button>
+                            </div>
+                            <p class="text-xs text-gray-400 mt-2">Format: PNG/JPG/PDF, maksimal 5MB.</p>
+                        </div>
+                    </div>
+
+                    <div class="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 max-w-4xl">
+                        <h4 class="text-sm font-bold text-gray-700 mb-4">Riwayat Invoice</h4>
+                        <div id="billing-invoices" class="divide-y divide-gray-100">
+                            <div class="py-6 text-center text-gray-400">Belum ada invoice.</div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- SECTION: PROFILE -->
                 <div id="section-profile" class="section-content hidden space-y-6">
                     <div class="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 max-w-2xl">
@@ -773,6 +826,7 @@
         let waContactsCache = [];
         let waGroupsCache = [];
         let waTargetsLoadedAt = 0;
+        let lastSubscriptionWarnAt = 0;
         const providerModelDetails = {};
 
         const vertexRegions = [
@@ -834,6 +888,19 @@
                 if (res.status === 401) {
                     window.location.href = '/login';
                     throw new Error("Unauthorized - Redirecting to login...");
+                }
+                if (res.status === 402) {
+                    const now = Date.now();
+                    if ((now - lastSubscriptionWarnAt) > 8000) {
+                        lastSubscriptionWarnAt = now;
+                        try {
+                            const data = await res.clone().json();
+                            Swal.fire('Langganan', data.message || 'Langganan tidak aktif.', 'warning');
+                        } catch (e) {
+                            Swal.fire('Langganan', 'Langganan tidak aktif.', 'warning');
+                        }
+                        if (typeof showSection === 'function') showSection('billing');
+                    }
                 }
                 return res;
             } catch (e) {
@@ -916,6 +983,7 @@
                 loadFollowups();
                 loadWAFollowupTargets();
             }
+            if(id === 'billing') loadBilling();
         }
 
         function toggleSidebar() {
@@ -1217,6 +1285,162 @@
             if (!participantSelect || !jidInput) return;
             const pj = (participantSelect.value || '').trim();
             if (pj) jidInput.value = pj;
+        }
+
+        async function loadBilling() {
+            const statusEl = document.getElementById('billing-status');
+            const bankEl = document.getElementById('billing-bank');
+            const planEl = document.getElementById('billing-plan');
+            const invoicesEl = document.getElementById('billing-invoices');
+            if (!statusEl || !bankEl || !planEl || !invoicesEl) return;
+
+            statusEl.textContent = 'Memuat status...';
+            bankEl.innerHTML = '';
+            planEl.innerHTML = '';
+            invoicesEl.innerHTML = '<div class="py-6 text-center text-gray-400"><i class="fas fa-circle-notch fa-spin"></i> Loading...</div>';
+
+            try {
+                const [statusRes, bankRes, plansRes, invoicesRes] = await Promise.all([
+                    fetchAuth('/api/billing/status'),
+                    fetchAuth('/api/billing/bank'),
+                    fetchAuth('/api/billing/plans'),
+                    fetchAuth('/api/billing/invoices')
+                ]);
+
+                if (statusRes.ok) {
+                    const data = await statusRes.json();
+                    if (data && data.success) {
+                        const sub = data.subscription || {};
+                        const active = !!data.active;
+                        const until = sub.current_period_end ? new Date(sub.current_period_end).toLocaleString() : '';
+                        const trial = sub.trial_end ? new Date(sub.trial_end).toLocaleString() : '';
+                        statusEl.innerHTML = active
+                            ? `<span class="px-2.5 py-1 text-xs font-bold rounded-full bg-green-100 text-green-700">Aktif</span> <span class="ml-2 text-gray-600 text-sm">Berlaku sampai: ${escapeHTML(until || trial || '-')}</span>`
+                            : `<span class="px-2.5 py-1 text-xs font-bold rounded-full bg-yellow-100 text-yellow-700">Tidak Aktif</span> <span class="ml-2 text-gray-600 text-sm">Silakan perpanjang.</span>`;
+                    }
+                }
+
+                if (bankRes.ok) {
+                    const data = await bankRes.json();
+                    if (data && data.success && data.bank) {
+                        const b = data.bank;
+                        const notes = (b.notes || '').trim();
+                        bankEl.innerHTML = `
+                            <div><span class="text-gray-500">Bank:</span> <span class="font-semibold">${escapeHTML(b.bank_name || '-')}</span></div>
+                            <div><span class="text-gray-500">No Rek:</span> <span class="font-semibold">${escapeHTML(b.account || '-')}</span></div>
+                            <div><span class="text-gray-500">Atas Nama:</span> <span class="font-semibold">${escapeHTML(b.holder || '-')}</span></div>
+                            ${notes ? `<div class="text-xs text-gray-500 mt-2">${escapeHTML(notes)}</div>` : ''}
+                        `;
+                    }
+                }
+
+                if (plansRes.ok) {
+                    const data = await plansRes.json();
+                    const plans = (data && data.success && Array.isArray(data.plans)) ? data.plans : [];
+                    if (plans.length === 0) {
+                        planEl.innerHTML = '<option value="">Tidak ada paket</option>';
+                    } else {
+                        plans.forEach(p => {
+                            const opt = document.createElement('option');
+                            opt.value = String(p.id);
+                            opt.textContent = `${p.name} - Rp ${Number(p.price_idr || 0).toLocaleString('id-ID')}/bulan`;
+                            planEl.appendChild(opt);
+                        });
+                    }
+                }
+
+                if (invoicesRes.ok) {
+                    const data = await invoicesRes.json();
+                    const invoices = (data && data.success && Array.isArray(data.invoices)) ? data.invoices : [];
+                    renderInvoices(invoices);
+                } else {
+                    invoicesEl.innerHTML = '<div class="py-6 text-center text-gray-400">Gagal memuat invoice.</div>';
+                }
+            } catch (e) {
+                statusEl.textContent = e.message || 'Gagal memuat billing.';
+                invoicesEl.innerHTML = '<div class="py-6 text-center text-gray-400">Gagal memuat invoice.</div>';
+            }
+        }
+
+        function renderInvoices(invoices) {
+            const invoicesEl = document.getElementById('billing-invoices');
+            if (!invoicesEl) return;
+            if (!invoices || invoices.length === 0) {
+                invoicesEl.innerHTML = '<div class="py-6 text-center text-gray-400">Belum ada invoice.</div>';
+                return;
+            }
+            invoicesEl.innerHTML = '';
+            invoices.forEach(inv => {
+                const wrap = document.createElement('div');
+                wrap.className = 'py-4 flex items-start justify-between gap-4';
+                const created = inv.created_at ? new Date(inv.created_at).toLocaleString() : '-';
+                const status = (inv.status || '').toString();
+                const proofLink = inv.proof_file ? `<a class="text-blue-600 underline text-xs" href="/api/billing/invoice/${inv.id}/proof" target="_blank" rel="noopener">Lihat bukti</a>` : '';
+                wrap.innerHTML = `
+                    <div class="min-w-0">
+                        <div class="flex flex-wrap items-center gap-2">
+                            <span class="text-xs font-bold px-2.5 py-1 rounded-full bg-gray-100 text-gray-700">#${inv.id}</span>
+                            <span class="text-xs text-gray-500">${escapeHTML(created)}</span>
+                            <span class="text-xs text-gray-600">${escapeHTML(status)}</span>
+                            ${proofLink}
+                        </div>
+                        <div class="mt-1 text-sm font-semibold text-gray-800">Rp ${Number(inv.amount_idr || 0).toLocaleString('id-ID')} / bulan</div>
+                    </div>
+                    <button onclick="document.getElementById('billing-invoice-id').value='${inv.id}'" class="flex-none text-blue-600 hover:bg-blue-50 px-3 py-2 rounded-lg transition text-sm font-semibold border border-blue-100">
+                        Pakai ID
+                    </button>
+                `;
+                invoicesEl.appendChild(wrap);
+            });
+        }
+
+        async function createInvoice() {
+            const planEl = document.getElementById('billing-plan');
+            if (!planEl) return;
+            const planId = parseInt(planEl.value || '0', 10);
+            if (!planId) {
+                Swal.fire('Error', 'Pilih paket dulu', 'warning');
+                return;
+            }
+            try {
+                const res = await fetchAuth('/api/billing/invoice', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ plan_id: planId })
+                });
+                const data = await res.json();
+                if (!res.ok || !data.success) throw new Error(data.message || data.error || 'Gagal membuat invoice');
+                const inv = data.invoice || {};
+                document.getElementById('billing-invoice-id').value = inv.id || '';
+                Swal.fire('Berhasil', `Invoice dibuat. ID: ${inv.id}`, 'success');
+                loadBilling();
+            } catch (e) {
+                Swal.fire('Gagal', e.message, 'error');
+            }
+        }
+
+        async function uploadProof() {
+            const idEl = document.getElementById('billing-invoice-id');
+            const fileEl = document.getElementById('billing-proof-file');
+            if (!idEl || !fileEl) return;
+            const id = parseInt(idEl.value || '0', 10);
+            const file = (fileEl.files && fileEl.files[0]) ? fileEl.files[0] : null;
+            if (!id || !file) {
+                Swal.fire('Error', 'Isi ID invoice dan pilih file bukti transfer', 'warning');
+                return;
+            }
+            const fd = new FormData();
+            fd.append('file', file);
+            try {
+                const res = await fetchAuth(`/api/billing/invoice/${id}/proof`, { method: 'POST', body: fd });
+                const data = await res.json();
+                if (!res.ok || !data.success) throw new Error(data.message || data.error || 'Gagal upload');
+                Swal.fire('Sukses', 'Bukti transfer berhasil diupload. Menunggu verifikasi admin.', 'success');
+                fileEl.value = '';
+                loadBilling();
+            } catch (e) {
+                Swal.fire('Gagal', e.message, 'error');
+            }
         }
 
         async function loadFollowups() {

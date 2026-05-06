@@ -85,6 +85,10 @@ type Config struct {
 	BrandingName   string                    `json:"branding_name"`
 	BrandingLogo   string                    `json:"branding_logo"`
 	BrandingVersion string                   `json:"branding_version"`
+	BillingBankName    string `json:"billing_bank_name"`
+	BillingBankAccount string `json:"billing_bank_account"`
+	BillingBankHolder  string `json:"billing_bank_holder"`
+	BillingNotes       string `json:"billing_notes"`
 	OTPEnabled     bool                      `json:"otp_enabled"`
 	SystemPrompt   string                    `json:"system_prompt"`
 	SavedPrompts   map[string]string         `json:"saved_prompts"`
@@ -1114,6 +1118,8 @@ func main() {
 	}
 	log.Println("Auth storage dialect:", authDialect)
 
+	ensureBillingSchema()
+
 	ensureColumn(authDB, "users", "whatsapp_number", "ALTER TABLE users ADD COLUMN whatsapp_number TEXT")
 	if authDialect == "postgres" {
 		ensureColumn(authDB, "users", "timezone", "ALTER TABLE users ADD COLUMN timezone TEXT")
@@ -1326,6 +1332,40 @@ func main() {
 			c.Locals("tenantID", tenantID)
 		}
 
+		return c.Next()
+	})
+
+	app.Use(func(c *fiber.Ctx) error {
+		if !strings.HasPrefix(c.Path(), "/api") {
+			return c.Next()
+		}
+		p := c.Path()
+		if strings.HasPrefix(p, "/api/auth") ||
+			strings.HasPrefix(p, "/api/public") ||
+			strings.HasPrefix(p, "/api/billing") ||
+			strings.HasPrefix(p, "/api/admin/billing") ||
+			p == "/api/me" ||
+			p == "/api/profile" ||
+			strings.HasPrefix(p, "/api/profile/") {
+			return c.Next()
+		}
+		isAdmin, _ := c.Locals("isAdmin").(bool)
+		if isAdmin {
+			userID := c.Locals("userID").(int)
+			if isPlatformAdminUser(userID) {
+				return c.Next()
+			}
+		}
+		tenantID := c.Locals("tenantID").(int)
+		ensureTenantSubscription(tenantID)
+		sub, ok := getTenantSubscription(tenantID)
+		if !ok || !isSubscriptionActive(sub) {
+			return c.Status(402).JSON(fiber.Map{
+				"success": false,
+				"code":    "SUBSCRIPTION_REQUIRED",
+				"message": "Langganan tidak aktif. Silakan perpanjang untuk menggunakan fitur ini.",
+			})
+		}
 		return c.Next()
 	})
 
@@ -2723,6 +2763,262 @@ func main() {
 		})
 	})
 
+	billing := api.Group("/billing")
+
+	billing.Get("/bank", func(c *fiber.Ctx) error {
+		mu.Lock()
+		bankName := strings.TrimSpace(cfg.BillingBankName)
+		bankAcc := strings.TrimSpace(cfg.BillingBankAccount)
+		bankHolder := strings.TrimSpace(cfg.BillingBankHolder)
+		notes := strings.TrimSpace(cfg.BillingNotes)
+		mu.Unlock()
+		return c.JSON(fiber.Map{
+			"success": true,
+			"bank": fiber.Map{
+				"bank_name":    bankName,
+				"account":      bankAcc,
+				"holder":       bankHolder,
+				"notes":        notes,
+				"amount_idr":   65000,
+				"billing_type": "manual_bank_transfer",
+			},
+		})
+	})
+
+	billing.Get("/plans", func(c *fiber.Ctx) error {
+		rows, err := authQuery("SELECT id, name, price_idr, limits_json, is_active FROM subscription_plans WHERE is_active = ? ORDER BY price_idr ASC", true)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Database error"})
+		}
+		defer rows.Close()
+		var plans []SubscriptionPlan
+		for rows.Next() {
+			var p SubscriptionPlan
+			if scanErr := rows.Scan(&p.ID, &p.Name, &p.PriceIDR, &p.LimitsJSON, &p.IsActive); scanErr == nil {
+				plans = append(plans, p)
+			}
+		}
+		return c.JSON(fiber.Map{"success": true, "plans": plans})
+	})
+
+	billing.Get("/status", func(c *fiber.Ctx) error {
+		tenantID := c.Locals("tenantID").(int)
+		ensureTenantSubscription(tenantID)
+		sub, ok := getTenantSubscription(tenantID)
+		if !ok {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Database error"})
+		}
+		active := isSubscriptionActive(sub)
+		return c.JSON(fiber.Map{
+			"success": true,
+			"active":  active,
+			"subscription": fiber.Map{
+				"tenant_id":           sub.TenantID,
+				"plan_id":             sub.PlanID,
+				"status":              sub.Status,
+				"current_period_end":  sub.CurrentPeriodEnd,
+				"trial_end":           sub.TrialEnd,
+				"grace_end":           sub.GraceEnd,
+			},
+		})
+	})
+
+	billing.Get("/invoices", func(c *fiber.Ctx) error {
+		tenantID := c.Locals("tenantID").(int)
+		rows, err := authQuery("SELECT id, tenant_id, plan_id, amount_idr, status, period_start, period_end, COALESCE(proof_file, ''), COALESCE(note, ''), created_at, COALESCE(paid_at, ?) FROM subscription_invoices WHERE tenant_id = ? ORDER BY id DESC LIMIT 20", time.Time{}, tenantID)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Database error"})
+		}
+		defer rows.Close()
+		var invoices []SubscriptionInvoice
+		for rows.Next() {
+			var inv SubscriptionInvoice
+			if scanErr := rows.Scan(&inv.ID, &inv.TenantID, &inv.PlanID, &inv.AmountIDR, &inv.Status, &inv.PeriodStart, &inv.PeriodEnd, &inv.ProofFile, &inv.Note, &inv.CreatedAt, &inv.PaidAt); scanErr == nil {
+				invoices = append(invoices, inv)
+			}
+		}
+		return c.JSON(fiber.Map{"success": true, "invoices": invoices})
+	})
+
+	billing.Post("/invoice", func(c *fiber.Ctx) error {
+		tenantID := c.Locals("tenantID").(int)
+		ensureTenantSubscription(tenantID)
+		var req struct {
+			PlanID int    `json:"plan_id"`
+			Note   string `json:"note"`
+		}
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid JSON"})
+		}
+		if req.PlanID <= 0 {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "plan_id wajib"})
+		}
+		var planName string
+		var amount int
+		err := authQueryRow("SELECT name, price_idr FROM subscription_plans WHERE id = ? AND is_active = ?", req.PlanID, true).Scan(&planName, &amount)
+		if err != nil || amount <= 0 {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Paket tidak valid"})
+		}
+		now := time.Now().UTC()
+		periodStart := now
+		periodEnd := now.AddDate(0, 1, 0)
+		req.Note = strings.TrimSpace(req.Note)
+		res, err := authExec("INSERT INTO subscription_invoices (tenant_id, plan_id, amount_idr, status, period_start, period_end, note) VALUES (?, ?, ?, ?, ?, ?, ?)", tenantID, req.PlanID, amount, "pending_proof", periodStart, periodEnd, req.Note)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Database error"})
+		}
+		invoiceID64, _ := res.LastInsertId()
+		invoiceID := int(invoiceID64)
+		if authDialect == "postgres" {
+			_ = authQueryRow("SELECT id FROM subscription_invoices WHERE tenant_id = ? ORDER BY id DESC LIMIT 1", tenantID).Scan(&invoiceID)
+		}
+		return c.JSON(fiber.Map{
+			"success": true,
+			"invoice": fiber.Map{
+				"id":           invoiceID,
+				"tenant_id":    tenantID,
+				"plan_id":      req.PlanID,
+				"plan_name":    planName,
+				"amount_idr":   amount,
+				"status":       "pending_proof",
+				"period_start": periodStart,
+				"period_end":   periodEnd,
+			},
+		})
+	})
+
+	billing.Post("/invoice/:id/proof", func(c *fiber.Ctx) error {
+		tenantID := c.Locals("tenantID").(int)
+		id, _ := strconv.Atoi(c.Params("id"))
+		if id <= 0 {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "ID invoice tidak valid"})
+		}
+		var invTenant int
+		var status string
+		err := authQueryRow("SELECT tenant_id, COALESCE(status,'') FROM subscription_invoices WHERE id = ?", id).Scan(&invTenant, &status)
+		if err != nil || invTenant != tenantID {
+			return c.Status(404).JSON(fiber.Map{"success": false, "message": "Invoice tidak ditemukan"})
+		}
+		file, err := c.FormFile("file")
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "File wajib diupload"})
+		}
+		if file.Size > 5*1024*1024 {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Ukuran file maksimal 5MB"})
+		}
+		ext := strings.ToLower(filepath.Ext(file.Filename))
+		switch ext {
+		case ".png", ".jpg", ".jpeg", ".pdf":
+		default:
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Format file harus PNG/JPG/PDF"})
+		}
+		os.MkdirAll(filepath.Join("uploads", "billing"), 0755)
+		suffix, _ := crand.Int(crand.Reader, big.NewInt(1000000))
+		filename := fmt.Sprintf("inv_%d_%s_%06d%s", id, time.Now().Format("20060102_150405"), suffix.Int64(), ext)
+		dstRel := filepath.Join("uploads", "billing", filename)
+		if err := c.SaveFile(file, dstRel); err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Gagal menyimpan file"})
+		}
+		_, err = authExec("UPDATE subscription_invoices SET proof_file = ?, status = ? WHERE id = ? AND tenant_id = ?", filename, "proof_submitted", id, tenantID)
+		if err != nil {
+			os.Remove(dstRel)
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Database error"})
+		}
+		return c.JSON(fiber.Map{"success": true})
+	})
+
+	billing.Get("/invoice/:id/proof", func(c *fiber.Ctx) error {
+		tenantID := c.Locals("tenantID").(int)
+		id, _ := strconv.Atoi(c.Params("id"))
+		if id <= 0 {
+			return c.SendStatus(404)
+		}
+		var invTenant int
+		var filename string
+		err := authQueryRow("SELECT tenant_id, COALESCE(proof_file,'') FROM subscription_invoices WHERE id = ?", id).Scan(&invTenant, &filename)
+		if err != nil || invTenant != tenantID {
+			return c.SendStatus(404)
+		}
+		filename = strings.TrimSpace(filename)
+		if filename == "" {
+			return c.SendStatus(404)
+		}
+		safe := filepath.Base(filename)
+		return c.SendFile(filepath.Join("uploads", "billing", safe))
+	})
+
+	adminBilling := api.Group("/admin/billing", requireAdmin)
+	adminBilling.Get("/invoices", func(c *fiber.Ctx) error {
+		status := strings.TrimSpace(c.Query("status", ""))
+		limit, _ := strconv.Atoi(c.Query("limit", "50"))
+		if limit <= 0 {
+			limit = 50
+		}
+		if limit > 200 {
+			limit = 200
+		}
+		var rows *sql.Rows
+		var err error
+		if status != "" {
+			rows, err = authQuery("SELECT id, tenant_id, plan_id, amount_idr, status, period_start, period_end, COALESCE(proof_file,''), COALESCE(note,''), created_at, COALESCE(paid_at, ?) FROM subscription_invoices WHERE status = ? ORDER BY id DESC LIMIT ?", time.Time{}, status, limit)
+		} else {
+			rows, err = authQuery("SELECT id, tenant_id, plan_id, amount_idr, status, period_start, period_end, COALESCE(proof_file,''), COALESCE(note,''), created_at, COALESCE(paid_at, ?) FROM subscription_invoices ORDER BY id DESC LIMIT ?", time.Time{}, limit)
+		}
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Database error"})
+		}
+		defer rows.Close()
+		var invoices []SubscriptionInvoice
+		for rows.Next() {
+			var inv SubscriptionInvoice
+			if scanErr := rows.Scan(&inv.ID, &inv.TenantID, &inv.PlanID, &inv.AmountIDR, &inv.Status, &inv.PeriodStart, &inv.PeriodEnd, &inv.ProofFile, &inv.Note, &inv.CreatedAt, &inv.PaidAt); scanErr == nil {
+				invoices = append(invoices, inv)
+			}
+		}
+		return c.JSON(fiber.Map{"success": true, "invoices": invoices})
+	})
+
+	adminBilling.Post("/invoices/:id/approve", func(c *fiber.Ctx) error {
+		id, _ := strconv.Atoi(c.Params("id"))
+		if id <= 0 {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "ID invoice tidak valid"})
+		}
+		var inv SubscriptionInvoice
+		err := authQueryRow("SELECT id, tenant_id, plan_id, amount_idr, status, period_start, period_end, COALESCE(proof_file,''), COALESCE(note,''), created_at, COALESCE(paid_at, ?) FROM subscription_invoices WHERE id = ?", time.Time{}, id).
+			Scan(&inv.ID, &inv.TenantID, &inv.PlanID, &inv.AmountIDR, &inv.Status, &inv.PeriodStart, &inv.PeriodEnd, &inv.ProofFile, &inv.Note, &inv.CreatedAt, &inv.PaidAt)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"success": false, "message": "Invoice tidak ditemukan"})
+		}
+		if strings.TrimSpace(inv.ProofFile) == "" {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Bukti transfer belum diupload"})
+		}
+		now := time.Now().UTC()
+		_, _ = authExec("UPDATE subscription_invoices SET status = ?, paid_at = ? WHERE id = ?", "paid", now, id)
+		upsertSQL := "INSERT INTO tenant_subscriptions (tenant_id, plan_id, status, current_period_end, trial_end, grace_end, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(tenant_id) DO UPDATE SET plan_id = excluded.plan_id, status = excluded.status, current_period_end = excluded.current_period_end, trial_end = excluded.trial_end, grace_end = excluded.grace_end, updated_at = excluded.updated_at"
+		if authDialect == "postgres" {
+			upsertSQL = "INSERT INTO tenant_subscriptions (tenant_id, plan_id, status, current_period_end, trial_end, grace_end, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (tenant_id) DO UPDATE SET plan_id = EXCLUDED.plan_id, status = EXCLUDED.status, current_period_end = EXCLUDED.current_period_end, trial_end = EXCLUDED.trial_end, grace_end = EXCLUDED.grace_end, updated_at = EXCLUDED.updated_at"
+		}
+		_, _ = authExec(upsertSQL, inv.TenantID, inv.PlanID, "active", inv.PeriodEnd, time.Time{}, time.Time{}, now)
+		return c.JSON(fiber.Map{"success": true})
+	})
+
+	adminBilling.Post("/invoices/:id/reject", func(c *fiber.Ctx) error {
+		id, _ := strconv.Atoi(c.Params("id"))
+		if id <= 0 {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "ID invoice tidak valid"})
+		}
+		var req struct {
+			Note string `json:"note"`
+		}
+		_ = c.BodyParser(&req)
+		req.Note = strings.TrimSpace(req.Note)
+		_, err := authExec("UPDATE subscription_invoices SET status = ?, note = ? WHERE id = ?", "rejected", req.Note, id)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Database error"})
+		}
+		return c.JSON(fiber.Map{"success": true})
+	})
+
 	api.Get("/user/config", func(c *fiber.Ctx) error {
 		userID := c.Locals("userID").(int)
 		tenantID := c.Locals("tenantID").(int)
@@ -3317,6 +3613,185 @@ func recordMessageEvent(tenantID, userID int, chatJID, direction string, created
 	)
 }
 
+type SubscriptionPlan struct {
+	ID          int    `json:"id"`
+	Name        string `json:"name"`
+	PriceIDR    int    `json:"price_idr"`
+	LimitsJSON  string `json:"limits_json"`
+	IsActive    bool   `json:"is_active"`
+}
+
+type TenantSubscription struct {
+	TenantID         int       `json:"tenant_id"`
+	PlanID           int       `json:"plan_id"`
+	Status           string    `json:"status"`
+	CurrentPeriodEnd time.Time `json:"current_period_end"`
+	TrialEnd         time.Time `json:"trial_end"`
+	GraceEnd         time.Time `json:"grace_end"`
+	UpdatedAt        time.Time `json:"updated_at"`
+}
+
+type SubscriptionInvoice struct {
+	ID          int       `json:"id"`
+	TenantID    int       `json:"tenant_id"`
+	PlanID      int       `json:"plan_id"`
+	AmountIDR   int       `json:"amount_idr"`
+	Status      string    `json:"status"`
+	PeriodStart time.Time `json:"period_start"`
+	PeriodEnd   time.Time `json:"period_end"`
+	ProofFile   string    `json:"proof_file"`
+	Note        string    `json:"note"`
+	CreatedAt   time.Time `json:"created_at"`
+	PaidAt      time.Time `json:"paid_at"`
+}
+
+func ensureBillingSchema() {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS subscription_plans (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			price_idr INTEGER NOT NULL,
+			limits_json TEXT NOT NULL DEFAULT '{}',
+			is_active BOOLEAN NOT NULL DEFAULT 1,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE TABLE IF NOT EXISTS tenant_subscriptions (
+			tenant_id INTEGER PRIMARY KEY,
+			plan_id INTEGER NOT NULL,
+			status TEXT NOT NULL,
+			current_period_end DATETIME,
+			trial_end DATETIME,
+			grace_end DATETIME,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY(tenant_id) REFERENCES tenants(id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS subscription_invoices (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			tenant_id INTEGER NOT NULL,
+			plan_id INTEGER NOT NULL,
+			amount_idr INTEGER NOT NULL,
+			status TEXT NOT NULL,
+			period_start DATETIME,
+			period_end DATETIME,
+			proof_file TEXT,
+			note TEXT,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			paid_at DATETIME,
+			FOREIGN KEY(tenant_id) REFERENCES tenants(id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS subscription_invoices_tenant_status_idx ON subscription_invoices(tenant_id, status)`,
+	}
+
+	if authDialect == "postgres" {
+		stmts = []string{
+			`CREATE TABLE IF NOT EXISTS subscription_plans (
+				id SERIAL PRIMARY KEY,
+				name TEXT NOT NULL,
+				price_idr INTEGER NOT NULL,
+				limits_json TEXT NOT NULL DEFAULT '{}',
+				is_active BOOLEAN NOT NULL DEFAULT TRUE,
+				created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+			)`,
+			`CREATE TABLE IF NOT EXISTS tenant_subscriptions (
+				tenant_id INTEGER PRIMARY KEY REFERENCES tenants(id),
+				plan_id INTEGER NOT NULL REFERENCES subscription_plans(id),
+				status TEXT NOT NULL,
+				current_period_end TIMESTAMPTZ,
+				trial_end TIMESTAMPTZ,
+				grace_end TIMESTAMPTZ,
+				updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+			)`,
+			`CREATE TABLE IF NOT EXISTS subscription_invoices (
+				id SERIAL PRIMARY KEY,
+				tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+				plan_id INTEGER NOT NULL REFERENCES subscription_plans(id),
+				amount_idr INTEGER NOT NULL,
+				status TEXT NOT NULL,
+				period_start TIMESTAMPTZ,
+				period_end TIMESTAMPTZ,
+				proof_file TEXT,
+				note TEXT,
+				created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+				paid_at TIMESTAMPTZ
+			)`,
+			`CREATE INDEX IF NOT EXISTS subscription_invoices_tenant_status_idx ON subscription_invoices(tenant_id, status)`,
+		}
+	}
+
+	for _, s := range stmts {
+		_, _ = authExec(s)
+	}
+
+	var planCount int
+	_ = authQueryRow("SELECT COUNT(*) FROM subscription_plans").Scan(&planCount)
+	if planCount == 0 {
+		limits := `{"max_users":3,"max_devices":1,"messages_per_month":2000}`
+		_, _ = authExec("INSERT INTO subscription_plans (name, price_idr, limits_json, is_active) VALUES (?, ?, ?, ?)", "Basic", 65000, limits, true)
+	}
+}
+
+func ensureTenantSubscription(tenantID int) {
+	var count int
+	_ = authQueryRow("SELECT COUNT(*) FROM tenant_subscriptions WHERE tenant_id = ?", tenantID).Scan(&count)
+	if count > 0 {
+		return
+	}
+	var planID int
+	err := authQueryRow("SELECT id FROM subscription_plans WHERE is_active = ? ORDER BY price_idr ASC LIMIT 1", true).Scan(&planID)
+	if err != nil || planID <= 0 {
+		err = authQueryRow("SELECT id FROM subscription_plans ORDER BY id ASC LIMIT 1").Scan(&planID)
+	}
+	if planID <= 0 {
+		return
+	}
+	now := time.Now().UTC()
+	trialEnd := now.Add(7 * 24 * time.Hour)
+	_, _ = authExec(
+		"INSERT INTO tenant_subscriptions (tenant_id, plan_id, status, current_period_end, trial_end, grace_end, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		tenantID, planID, "trial", time.Time{}, trialEnd, time.Time{}, now,
+	)
+}
+
+func getTenantSubscription(tenantID int) (TenantSubscription, bool) {
+	var sub TenantSubscription
+	sub.TenantID = tenantID
+	err := authQueryRow(
+		"SELECT plan_id, COALESCE(status, ''), COALESCE(current_period_end, ?), COALESCE(trial_end, ?), COALESCE(grace_end, ?), COALESCE(updated_at, ?) FROM tenant_subscriptions WHERE tenant_id = ?",
+		time.Time{}, time.Time{}, time.Time{}, time.Time{}, tenantID,
+	).Scan(&sub.PlanID, &sub.Status, &sub.CurrentPeriodEnd, &sub.TrialEnd, &sub.GraceEnd, &sub.UpdatedAt)
+	if err != nil {
+		return TenantSubscription{}, false
+	}
+	sub.Status = strings.TrimSpace(sub.Status)
+	return sub, true
+}
+
+func isSubscriptionActive(sub TenantSubscription) bool {
+	now := time.Now().UTC()
+	if strings.ToLower(strings.TrimSpace(sub.Status)) == "active" && !sub.CurrentPeriodEnd.IsZero() && now.Before(sub.CurrentPeriodEnd) {
+		return true
+	}
+	if strings.ToLower(strings.TrimSpace(sub.Status)) == "trial" && !sub.TrialEnd.IsZero() && now.Before(sub.TrialEnd) {
+		return true
+	}
+	if strings.ToLower(strings.TrimSpace(sub.Status)) == "past_due" && !sub.GraceEnd.IsZero() && now.Before(sub.GraceEnd) {
+		return true
+	}
+	return false
+}
+
+func isPlatformAdminUser(userID int) bool {
+	mu.Lock()
+	adminUsername := strings.TrimSpace(cfg.AdminUsername)
+	mu.Unlock()
+	if adminUsername == "" {
+		return false
+	}
+	var count int
+	_ = authQueryRow("SELECT COUNT(*) FROM users WHERE id = ? AND COALESCE(is_admin, FALSE) = ? AND username = ?", userID, true, adminUsername).Scan(&count)
+	return count > 0
+}
+
 func startAllUserDevices(userID int, tenantID int) {
 	rows, err := authQuery("SELECT device_jid FROM user_devices WHERE user_id = ? AND tenant_id = ?", userID, tenantID)
 	if err != nil {
@@ -3495,6 +3970,11 @@ func handleUserEvent(userID int, cli *whatsmeow.Client, evt interface{}) {
 				log.Println("Error getting tenant for user", userID, ":", err)
 				tenantID = 1
 				isAdmin = false
+			}
+			ensureTenantSubscription(tenantID)
+			if sub, ok := getTenantSubscription(tenantID); !ok || !isSubscriptionActive(sub) {
+				log.Printf("[User %d] Subscription inactive for tenant %d, skipping reply", userID, tenantID)
+				return
 			}
 
 			// Send typing indicator to WhatsApp
@@ -4138,6 +4618,11 @@ func processFollowups() {
 
 		for _, t := range tasks {
 			log.Println("Processing Followup Task:", t.ID)
+
+			ensureTenantSubscription(t.TenantID)
+			if sub, ok := getTenantSubscription(t.TenantID); !ok || !isSubscriptionActive(sub) {
+				continue
+			}
 
 			// Generate Message
 			var isAdmin bool
