@@ -131,10 +131,25 @@ var (
 	authRateLimitMap = make(map[string][]time.Time)
 	authRateLimitMux sync.RWMutex
 
+	// Login failure tracking for account lockout (key: "tenantID:username")
+	loginFailMap = make(map[string]loginFailRecord)
+	loginFailMux sync.Mutex
+
+	// OTP resend cooldown per user (key: userID)
+	otpResendMap = make(map[int]time.Time)
+	otpResendMux sync.Mutex
+
 	// Tenant-specific knowledge cache
 	tenantKnowledge = make(map[int]string)
 	knowledgeMutex  sync.RWMutex
 )
+
+// loginFailRecord tracks failed login attempts for account lockout
+type loginFailRecord struct {
+	Count     int
+	LastFail  time.Time
+	LockedAt  time.Time
+}
 
 const redactedSecret = "__REDACTED__"
 const buildVersion = "1.3.0-MultiTenant"
@@ -233,6 +248,151 @@ func generateSecureOTP() (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("%06d", otpInt), nil
+}
+
+// ========== AUDIT LOGGING ==========
+
+// logAudit writes a structured audit log entry to stdout.
+// Format: [AUDIT] timestamp | event | userID | tenantID | ip | detail
+func logAudit(event string, userID, tenantID int, ip, detail string) {
+	log.Printf("[AUDIT] event=%s userID=%d tenantID=%d ip=%s detail=%s",
+		event, userID, tenantID, ip, detail)
+}
+
+// ========== ACCOUNT LOCKOUT ==========
+
+const (
+	loginMaxFailures    = 5               // lock after 5 consecutive failures
+	loginLockDuration   = 15 * time.Minute // locked for 15 minutes
+	loginFailResetAfter = 30 * time.Minute // reset counter after 30 min of no failures
+)
+
+// lockoutKey returns the map key for a given tenant+username combo
+func lockoutKey(tenantID int, username string) string {
+	return fmt.Sprintf("%d:%s", tenantID, strings.ToLower(strings.TrimSpace(username)))
+}
+
+// recordLoginFailure increments the failure counter and locks if threshold reached
+func recordLoginFailure(tenantID int, username string) {
+	key := lockoutKey(tenantID, username)
+	loginFailMux.Lock()
+	defer loginFailMux.Unlock()
+	rec := loginFailMap[key]
+	now := time.Now()
+	// Reset counter if last failure was long ago
+	if !rec.LastFail.IsZero() && now.Sub(rec.LastFail) > loginFailResetAfter {
+		rec.Count = 0
+		rec.LockedAt = time.Time{}
+	}
+	rec.Count++
+	rec.LastFail = now
+	if rec.Count >= loginMaxFailures {
+		rec.LockedAt = now
+	}
+	loginFailMap[key] = rec
+}
+
+// resetLoginFailures clears the failure counter on successful login
+func resetLoginFailures(tenantID int, username string) {
+	key := lockoutKey(tenantID, username)
+	loginFailMux.Lock()
+	defer loginFailMux.Unlock()
+	delete(loginFailMap, key)
+}
+
+// checkAccountLocked returns (locked bool, remainingDuration)
+func checkAccountLocked(tenantID int, username string) (bool, time.Duration) {
+	key := lockoutKey(tenantID, username)
+	loginFailMux.Lock()
+	defer loginFailMux.Unlock()
+	rec, ok := loginFailMap[key]
+	if !ok || rec.LockedAt.IsZero() {
+		return false, 0
+	}
+	elapsed := time.Since(rec.LockedAt)
+	if elapsed >= loginLockDuration {
+		// Lock expired — clear it
+		delete(loginFailMap, key)
+		return false, 0
+	}
+	return true, loginLockDuration - elapsed
+}
+
+// ========== OTP RESEND COOLDOWN ==========
+
+const otpResendCooldown = 60 * time.Second
+
+// checkOTPResendCooldown returns (allowed bool, waitDuration)
+func checkOTPResendCooldown(userID int) (bool, time.Duration) {
+	otpResendMux.Lock()
+	defer otpResendMux.Unlock()
+	last, ok := otpResendMap[userID]
+	if !ok {
+		return true, 0
+	}
+	elapsed := time.Since(last)
+	if elapsed >= otpResendCooldown {
+		return true, 0
+	}
+	return false, otpResendCooldown - elapsed
+}
+
+// recordOTPResend records the time of the last OTP send for a user
+func recordOTPResend(userID int) {
+	otpResendMux.Lock()
+	defer otpResendMux.Unlock()
+	otpResendMap[userID] = time.Now()
+}
+
+// ========== PASSWORD COMPLEXITY ==========
+
+// validatePasswordComplexity checks that a password meets minimum complexity requirements:
+// at least 8 chars, 1 uppercase letter, 1 digit.
+func validatePasswordComplexity(password string) string {
+	if len(password) < 8 {
+		return "Password minimal 8 karakter"
+	}
+	hasUpper := false
+	hasDigit := false
+	for _, ch := range password {
+		if ch >= 'A' && ch <= 'Z' {
+			hasUpper = true
+		}
+		if ch >= '0' && ch <= '9' {
+			hasDigit = true
+		}
+	}
+	if !hasUpper {
+		return "Password harus mengandung minimal 1 huruf kapital"
+	}
+	if !hasDigit {
+		return "Password harus mengandung minimal 1 angka"
+	}
+	return ""
+}
+
+// ========== EMAIL VALIDATION ==========
+
+// validateEmail performs a basic but stricter email format check.
+func validateEmail(email string) bool {
+	email = strings.TrimSpace(email)
+	if len(email) < 5 || len(email) > 254 {
+		return false
+	}
+	atIdx := strings.LastIndex(email, "@")
+	if atIdx < 1 {
+		return false
+	}
+	local := email[:atIdx]
+	domain := email[atIdx+1:]
+	if len(local) == 0 || len(domain) < 3 {
+		return false
+	}
+	dotIdx := strings.LastIndex(domain, ".")
+	if dotIdx < 1 || dotIdx == len(domain)-1 {
+		return false
+	}
+	return true
 }
 
 // rateLimitMiddleware limits auth requests to 5 per minute per IP
@@ -1262,7 +1422,7 @@ func main() {
 	})
 
 	app := fiber.New(fiber.Config{
-		BodyLimit: 50 * 1024 * 1024, // 50MB Limit
+		BodyLimit: 10 * 1024 * 1024, // 10MB Limit
 	})
 	app.Use(func(c *fiber.Ctx) error {
 		p := strings.ToLower(c.Path())
@@ -1448,7 +1608,7 @@ func main() {
 			return c.Status(401).JSON(fiber.Map{"success": false, "message": "User tidak ditemukan"})
 		} else if err != nil {
 			log.Println("Login database error:", err)
-			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Database Error"})
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Terjadi kesalahan, coba lagi"})
 		}
 
 		// Check Active
@@ -1460,6 +1620,14 @@ func main() {
 		// Check Password (MANDATORY)
 		if req.Password == "" {
 			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Password wajib diisi"})
+		}
+
+		// Check account lockout before verifying password
+		if locked, remaining := checkAccountLocked(tenantID, user.Username); locked {
+			return c.Status(429).JSON(fiber.Map{
+				"success": false,
+				"message": fmt.Sprintf("Akun dikunci sementara karena terlalu banyak percobaan login gagal. Coba lagi dalam %s.", remaining.Round(time.Second)),
+			})
 		}
 
 		passwordMatch := false
@@ -1483,8 +1651,13 @@ func main() {
 		}
 
 		if !passwordMatch {
+			recordLoginFailure(tenantID, user.Username)
+			logAudit("LOGIN_FAILED", user.ID, tenantID, c.IP(), fmt.Sprintf("username=%s reason=wrong_password", user.Username))
 			return c.Status(401).JSON(fiber.Map{"success": false, "message": "Password salah"})
 		}
+
+		// Password valid — reset failure counter
+		resetLoginFailures(tenantID, user.Username)
 
 		// Password is Valid -> Send OTP
 
@@ -1500,6 +1673,7 @@ func main() {
 			if err := sess.Save(); err != nil {
 				return c.Status(500).JSON(fiber.Map{"success": false, "message": "Session Error"})
 			}
+			logAudit("LOGIN_SUCCESS", user.ID, tenantID, c.IP(), fmt.Sprintf("username=%s", user.Username))
 			return c.JSON(fiber.Map{"success": true, "message": message})
 		}
 
@@ -1517,8 +1691,6 @@ func main() {
 			}
 			return c.Status(503).JSON(fiber.Map{"success": false, "message": "Sistem OTP sedang offline. Silakan coba lagi beberapa saat."})
 		}
-
-		// Generate OTP
 		otp, err := generateSecureOTP()
 		if err != nil {
 			log.Println("Failed to generate OTP:", err)
@@ -1660,9 +1832,11 @@ func main() {
 			sess.Delete("pending_user_id")
 			sess.Delete("pending_is_admin")
 			sess.Save()
+			logAudit("OTP_VERIFY_SUCCESS", userID, tenantIDInt, c.IP(), "")
 			return c.JSON(fiber.Map{"success": true})
 		}
 
+		logAudit("OTP_VERIFY_FAILED", 0, 0, c.IP(), "wrong_otp")
 		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Kode OTP salah"})
 	})
 
@@ -1708,12 +1882,23 @@ func main() {
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Sistem Bot belum terhubung, tidak bisa kirim OTP"})
 		}
 
+		// Enforce per-user OTP resend cooldown
+		if allowed, wait := checkOTPResendCooldown(userID); !allowed {
+			return c.Status(429).JSON(fiber.Map{
+				"success": false,
+				"message": fmt.Sprintf("Tunggu %s sebelum meminta OTP baru.", wait.Round(time.Second)),
+			})
+		}
+
 		// Generate new OTP
 		otp, err := generateSecureOTP()
 		if err != nil {
 			log.Println("Failed to generate OTP for resend:", err)
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Gagal generate OTP"})
 		}
+
+		// Record resend time
+		recordOTPResend(userID)
 
 		// Update session with new OTP
 		sess.Set("otp", otp)
@@ -1773,7 +1958,7 @@ func main() {
 		}
 
 		if req.Email != "" {
-			if !strings.Contains(req.Email, "@") {
+			if !validateEmail(req.Email) {
 				return c.Status(400).JSON(fiber.Map{"success": false, "message": "Format Email tidak valid"})
 			}
 			// Get tenant ID from context (set by tenantMiddleware)
@@ -1796,8 +1981,8 @@ func main() {
 		if len(req.Username) < 10 {
 			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Nomor WhatsApp tidak valid (Wajib)"})
 		}
-		if len(req.Password) < 8 {
-			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Password minimal 8 karakter"})
+		if errMsg := validatePasswordComplexity(req.Password); errMsg != "" {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": errMsg})
 		}
 
 		// Hash password before storing
@@ -1830,7 +2015,14 @@ func main() {
 		// SEND OTP
 		sysClient := getSystemBot(tenantID)
 		if sysClient == nil || !sysClient.IsConnected() {
-			return c.JSON(fiber.Map{"success": true, "require_otp": false, "message": "Pendaftaran berhasil. Bot belum terhubung, tidak bisa kirim OTP."})
+			// Bot offline: akun tetap inactive, admin harus approve manual
+			log.Printf("[REGISTER] Bot OTP offline, akun %s menunggu persetujuan admin (tenant %d)", req.Username, tenantID)
+			return c.JSON(fiber.Map{
+				"success":          true,
+				"require_otp":      false,
+				"pending_approval": true,
+				"message":          "Pendaftaran berhasil. Bot OTP sedang offline, akun Anda menunggu persetujuan admin.",
+			})
 		}
 
 		otp, err := generateSecureOTP()
@@ -1855,6 +2047,9 @@ func main() {
 		sess.Set("pending_is_admin", false)
 		sess.Set("tenantID", tenantID)
 		sess.Save()
+
+		// Record initial OTP send for cooldown tracking
+		recordOTPResend(userID)
 
 		// Send OTP asynchronously (non-blocking)
 		go func() {
@@ -1892,6 +2087,7 @@ func main() {
 			log.Printf("Registration OTP sent to %s", targetNumber)
 		}()
 
+		logAudit("REGISTER_SUCCESS", 0, tenantID, c.IP(), fmt.Sprintf("username=%s", req.Username))
 		return c.JSON(fiber.Map{"success": true, "require_otp": true, "message": "Pendaftaran berhasil. Masukkan kode OTP yang dikirim ke WhatsApp."})
 	})
 
@@ -1901,10 +2097,15 @@ func main() {
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Session Error"})
 		}
 
+		// Capture user info before destroying session for audit log
+		loggedUserID, _ := sess.Get("userID").(int)
+		loggedTenantID, _ := sess.Get("tenantID").(int)
+
 		if err := sess.Destroy(); err != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to destroy session"})
 		}
 
+		logAudit("LOGOUT", loggedUserID, loggedTenantID, c.IP(), "")
 		return c.JSON(fiber.Map{"success": true})
 	})
 
@@ -1981,6 +2182,9 @@ func main() {
 		go connectAppDB()
 		go connectSheets()
 		go refreshKnowledge()
+		adminID, _ := c.Locals("userID").(int)
+		tenantID, _ := c.Locals("tenantID").(int)
+		logAudit("ADMIN_CONFIG_UPDATE", adminID, tenantID, c.IP(), "")
 		return c.JSON(fiber.Map{"success": true})
 	})
 
@@ -2312,7 +2516,7 @@ func main() {
 		if len(req.WhatsApp) < 10 || strings.Contains(req.WhatsApp, "@") {
 			return c.Status(400).JSON(fiber.Map{"error": "Nomor WhatsApp tidak valid"})
 		}
-		if req.Email != "" && !strings.Contains(req.Email, "@") {
+		if req.Email != "" && !validateEmail(req.Email) {
 			return c.Status(400).JSON(fiber.Map{"error": "Email tidak valid"})
 		}
 		if req.Timezone != "" {
@@ -2344,8 +2548,8 @@ func main() {
 		}
 
 		if req.Password != "" {
-			if len(req.Password) < 8 {
-				return c.Status(400).JSON(fiber.Map{"error": "Password minimal 8 karakter"})
+			if errMsg := validatePasswordComplexity(req.Password); errMsg != "" {
+				return c.Status(400).JSON(fiber.Map{"error": errMsg})
 			}
 			// Hash password before updating
 			hashedPassword, err := hashPassword(req.Password)
@@ -3457,6 +3661,8 @@ func main() {
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": "Username already exists or Database error"})
 		}
+		adminID, _ := c.Locals("userID").(int)
+		logAudit("ADMIN_USER_CREATE", adminID, tenantID, c.IP(), fmt.Sprintf("new_username=%s", req.Username))
 		return c.JSON(fiber.Map{"success": true})
 	})
 
@@ -3502,6 +3708,7 @@ func main() {
 			return c.Status(400).JSON(fiber.Map{"error": "Cannot delete yourself"})
 		}
 		authExec("DELETE FROM users WHERE id = ? AND tenant_id = ?", id, tenantID)
+		logAudit("ADMIN_USER_DELETE", myID, tenantID, c.IP(), fmt.Sprintf("deleted_user_id=%s", id))
 		return c.JSON(fiber.Map{"success": true})
 	})
 
