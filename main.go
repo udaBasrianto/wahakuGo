@@ -283,7 +283,7 @@ func envBool(name string) bool {
 }
 
 func otpDisabled() bool {
-	if envBool("DISABLE_OTP") {
+	if envBool("FORCE_DISABLE_OTP") {
 		return true
 	}
 	mu.Lock()
