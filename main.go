@@ -1488,6 +1488,10 @@ func main() {
 				strings.HasSuffix(p, ".woff") || strings.HasSuffix(p, ".woff2") {
 				return true
 			}
+			// Skip CSRF for auth endpoints — protected by rate limiting + account lockout
+			if strings.HasPrefix(p, "/api/auth/") {
+				return true
+			}
 			return false
 		},
 		ErrorHandler: func(c *fiber.Ctx, err error) error {
