@@ -1226,9 +1226,13 @@ func main() {
 
 		// Send OTP asynchronously (non-blocking)
 		go func() {
-			targetNumber := user.WhatsApp
-			if strings.TrimSpace(targetNumber) == "" {
-				targetNumber = user.Username
+			targetNumber := strings.TrimSpace(user.WhatsApp)
+			if targetNumber == "" {
+				targetNumber = strings.TrimSpace(user.Username)
+			}
+			if targetNumber == "" || strings.Contains(targetNumber, "@") || len(targetNumber) < 10 {
+				log.Printf("Failed to send async OTP: nomor WhatsApp belum valid (username=%s whatsapp_number=%s)", user.Username, user.WhatsApp)
+				return
 			}
 			targetJID := types.NewJID(targetNumber, types.DefaultUserServer)
 			if sysClient.Store.ID != nil && targetJID.User == sysClient.Store.ID.User {
@@ -1240,14 +1244,14 @@ func main() {
 				Conversation: proto.String("🔐 Kode Login Wahaku Dashboard: *" + otp + "*\n\nJangan berikan kode ini kepada siapapun."),
 			}
 
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 
 			_, err := sysClient.SendMessage(ctx, targetJID, msg)
 			if err != nil {
-				log.Printf("Failed to send async OTP to %s: %v", user.Username, err)
+				log.Printf("Failed to send async OTP to %s: %v", targetNumber, err)
 			} else {
-				log.Printf("OTP sent async to %s", user.Username)
+				log.Printf("OTP sent async to %s", targetNumber)
 			}
 		}()
 
@@ -1407,7 +1411,7 @@ func main() {
 				Conversation: proto.String("🔐 Kode Verifikasi (Ulang): *" + otp + "*\n\nMasukkan kode ini untuk menyelesaikan verifikasi."),
 			}
 
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 
 			_, err := sysClient.SendMessage(ctx, targetJID, msg)
@@ -1526,7 +1530,7 @@ func main() {
 				Conversation: proto.String("🔐 Kode Verifikasi Pendaftaran Wahaku: *" + otp + "*\n\nMasukkan kode ini untuk menyelesaikan pendaftaran."),
 			}
 
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 
 			_, err := sysClient.SendMessage(ctx, targetJID, msg)
