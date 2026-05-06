@@ -132,6 +132,7 @@ const buildTime = "2026-05-04"
 type User struct {
 	ID       int    `json:"id"`
 	Username string `json:"username"`
+	WhatsApp string `json:"whatsapp_number"`
 	Email    string `json:"email"`
 	Password string `json:"password"`
 	IsAdmin  bool   `json:"is_admin"`
@@ -319,6 +320,7 @@ func initAuthSchema() error {
 				id SERIAL PRIMARY KEY,
 				tenant_id INTEGER NOT NULL DEFAULT 1 REFERENCES tenants(id),
 				username TEXT NOT NULL,
+				whatsapp_number TEXT,
 				email TEXT,
 				password TEXT,
 				is_admin BOOLEAN NOT NULL DEFAULT FALSE,
@@ -393,6 +395,7 @@ func initAuthSchema() error {
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		tenant_id INTEGER NOT NULL DEFAULT 1,
 		username TEXT UNIQUE,
+		whatsapp_number TEXT,
 		email TEXT,
 		password TEXT,
 		is_admin BOOLEAN DEFAULT 0,
@@ -513,6 +516,18 @@ func getUserAIConfig(userID, tenantID int) (UserAIConfig, bool) {
 		ActiveProvider: strings.TrimSpace(activeProvider),
 		Providers:      providers,
 	}, true
+}
+
+func defaultSystemPromptForProvider(providerName, model string) string {
+	p := strings.ToLower(strings.TrimSpace(providerName))
+	m := strings.ToLower(strings.TrimSpace(model))
+	if strings.Contains(m, "code") || strings.Contains(m, "coder") {
+		return "You are a helpful coding assistant."
+	}
+	if p == "sumopod" {
+		return "You are a helpful assistant."
+	}
+	return "You are a helpful assistant."
 }
 
 func setUserAIConfig(userID, tenantID int, cfg UserAIConfig) error {
@@ -833,6 +848,8 @@ func main() {
 	}
 	log.Println("Auth storage dialect:", authDialect)
 
+	ensureColumn(authDB, "users", "whatsapp_number", "ALTER TABLE users ADD COLUMN whatsapp_number TEXT")
+
 	if authDialect == "sqlite" {
 		ensureColumn(authDB, "users", "tenant_id", "ALTER TABLE users ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1")
 		ensureColumn(authDB, "user_devices", "tenant_id", "ALTER TABLE user_devices ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1")
@@ -1092,12 +1109,12 @@ func main() {
 			tenantID = 1
 		}
 
-		query := "SELECT id, username, COALESCE(email, ''), COALESCE(password, ''), COALESCE(is_admin, FALSE), COALESCE(is_active, FALSE) FROM users WHERE username = ? AND tenant_id = ?"
+		query := "SELECT id, username, COALESCE(whatsapp_number, ''), COALESCE(email, ''), COALESCE(password, ''), COALESCE(is_admin, FALSE), COALESCE(is_active, FALSE) FROM users WHERE username = ? AND tenant_id = ?"
 		if isEmailLogin {
-			query = "SELECT id, username, COALESCE(email, ''), COALESCE(password, ''), COALESCE(is_admin, FALSE), COALESCE(is_active, FALSE) FROM users WHERE email = ? AND tenant_id = ?"
+			query = "SELECT id, username, COALESCE(whatsapp_number, ''), COALESCE(email, ''), COALESCE(password, ''), COALESCE(is_admin, FALSE), COALESCE(is_active, FALSE) FROM users WHERE email = ? AND tenant_id = ?"
 		}
 
-		err = authQueryRow(query, req.Username, tenantID).Scan(&user.ID, &user.Username, &user.Email, &user.Password, &user.IsAdmin, &user.IsActive)
+		err = authQueryRow(query, req.Username, tenantID).Scan(&user.ID, &user.Username, &user.WhatsApp, &user.Email, &user.Password, &user.IsAdmin, &user.IsActive)
 
 		if err == sql.ErrNoRows {
 			return c.Status(401).JSON(fiber.Map{"success": false, "message": "User tidak ditemukan"})
@@ -1198,7 +1215,11 @@ func main() {
 
 		// Send OTP asynchronously (non-blocking)
 		go func() {
-			targetJID := types.NewJID(user.Username, types.DefaultUserServer)
+			targetNumber := user.WhatsApp
+			if strings.TrimSpace(targetNumber) == "" {
+				targetNumber = user.Username
+			}
+			targetJID := types.NewJID(targetNumber, types.DefaultUserServer)
 			if sysClient.Store.ID != nil && targetJID.User == sysClient.Store.ID.User {
 				targetJID = *sysClient.Store.ID
 				targetJID.Device = 0
@@ -1335,8 +1356,8 @@ func main() {
 
 		// Fetch user from database
 		var user User
-		err = authQueryRow("SELECT id, username, COALESCE(email, ''), COALESCE(password, ''), COALESCE(is_admin, FALSE), COALESCE(is_active, FALSE) FROM users WHERE id = ? AND tenant_id = ?", userID, tenantID).
-			Scan(&user.ID, &user.Username, &user.Email, &user.Password, &user.IsAdmin, &user.IsActive)
+		err = authQueryRow("SELECT id, username, COALESCE(whatsapp_number, ''), COALESCE(email, ''), COALESCE(password, ''), COALESCE(is_admin, FALSE), COALESCE(is_active, FALSE) FROM users WHERE id = ? AND tenant_id = ?", userID, tenantID).
+			Scan(&user.ID, &user.Username, &user.WhatsApp, &user.Email, &user.Password, &user.IsAdmin, &user.IsActive)
 		if err != nil {
 			return c.Status(404).JSON(fiber.Map{"success": false, "message": "User tidak ditemukan"})
 		}
@@ -1361,7 +1382,11 @@ func main() {
 
 		// Send OTP asynchronously (non-blocking)
 		go func() {
-			targetJID := types.NewJID(user.Username, types.DefaultUserServer)
+			targetNumber := user.WhatsApp
+			if strings.TrimSpace(targetNumber) == "" {
+				targetNumber = user.Username
+			}
+			targetJID := types.NewJID(targetNumber, types.DefaultUserServer)
 			if sysClient.Store.ID != nil && targetJID.User == sysClient.Store.ID.User {
 				targetJID = *sysClient.Store.ID
 				targetJID.Device = 0
@@ -1439,7 +1464,7 @@ func main() {
 			tenantID = 1
 		}
 
-		_, err = authExec("INSERT INTO users (username, email, password, tenant_id, is_admin, is_active) VALUES (?, ?, ?, ?, ?, ?)", req.Username, req.Email, hashedPassword, tenantID, false, false)
+		_, err = authExec("INSERT INTO users (username, whatsapp_number, email, password, tenant_id, is_admin, is_active) VALUES (?, ?, ?, ?, ?, ?, ?)", req.Username, req.Username, req.Email, hashedPassword, tenantID, false, false)
 		if err != nil {
 			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Nomor WhatsApp atau Email sudah terdaftar"})
 		}
@@ -1837,20 +1862,23 @@ func main() {
 		tenantID := c.Locals("tenantID").(int)
 		isAdmin, _ := c.Locals("isAdmin").(bool)
 
-		var username, email, tenantName string
+		var username, whatsappNumber, email, tenantName string
 		var isActive bool
-		authQueryRow("SELECT COALESCE(username, ''), COALESCE(email, ''), COALESCE(is_active, FALSE) FROM users WHERE id = ? AND tenant_id = ?", userID, tenantID).Scan(&username, &email, &isActive)
+		authQueryRow("SELECT COALESCE(username, ''), COALESCE(whatsapp_number, ''), COALESCE(email, ''), COALESCE(is_active, FALSE) FROM users WHERE id = ? AND tenant_id = ?", userID, tenantID).Scan(&username, &whatsappNumber, &email, &isActive)
 		authQueryRow("SELECT COALESCE(name, '') FROM tenants WHERE id = ?", tenantID).Scan(&tenantName)
+		if strings.TrimSpace(whatsappNumber) == "" {
+			whatsappNumber = username
+		}
 
 		return c.JSON(fiber.Map{
 			"id":            userID,
 			"username":      username,
+			"whatsapp_number": whatsappNumber,
 			"email":         email,
 			"is_admin":      isAdmin,
 			"is_active":     isActive,
 			"tenant_id":     tenantID,
 			"tenant_name":   tenantName,
-			"system_prompt": getUserSystemPrompt(userID, tenantID),
 		})
 	})
 
@@ -1862,17 +1890,24 @@ func main() {
 		userID := c.Locals("userID").(int)
 		var req struct {
 			Username     string `json:"username"`
+			WhatsApp     string `json:"whatsapp_number"`
 			Email        string `json:"email"`
 			Password     string `json:"password"`
-			SystemPrompt string `json:"system_prompt"`
 		}
 		if err := c.BodyParser(&req); err != nil {
 			return c.Status(400).JSON(fiber.Map{"error": "Invalid JSON"})
 		}
 		req.Username = strings.TrimSpace(req.Username)
+		req.WhatsApp = strings.TrimSpace(req.WhatsApp)
 		req.Email = strings.TrimSpace(req.Email)
 		if req.Username == "" {
 			return c.Status(400).JSON(fiber.Map{"error": "Username cannot be empty"})
+		}
+		if req.WhatsApp == "" {
+			return c.Status(400).JSON(fiber.Map{"error": "Nomor WhatsApp wajib diisi"})
+		}
+		if len(req.WhatsApp) < 10 || strings.Contains(req.WhatsApp, "@") {
+			return c.Status(400).JSON(fiber.Map{"error": "Nomor WhatsApp tidak valid"})
 		}
 		if req.Email != "" && !strings.Contains(req.Email, "@") {
 			return c.Status(400).JSON(fiber.Map{"error": "Email tidak valid"})
@@ -1882,6 +1917,11 @@ func main() {
 		authQueryRow("SELECT COUNT(*) FROM users WHERE username = ? AND id != ? AND tenant_id = ?", req.Username, userID, tenantID).Scan(&count)
 		if count > 0 {
 			return c.Status(400).JSON(fiber.Map{"error": "Username already taken"})
+		}
+
+		authQueryRow("SELECT COUNT(*) FROM users WHERE whatsapp_number = ? AND id != ? AND tenant_id = ?", req.WhatsApp, userID, tenantID).Scan(&count)
+		if count > 0 {
+			return c.Status(400).JSON(fiber.Map{"error": "Nomor WhatsApp sudah terpakai"})
 		}
 
 		if req.Email != "" {
@@ -1901,14 +1941,9 @@ func main() {
 				log.Println("Failed to hash password during profile update:", err)
 				return c.Status(500).JSON(fiber.Map{"error": "Failed to process password"})
 			}
-			authExec("UPDATE users SET username = ?, email = ?, password = ? WHERE id = ? AND tenant_id = ?", req.Username, req.Email, hashedPassword, userID, tenantID)
+			authExec("UPDATE users SET username = ?, whatsapp_number = ?, email = ?, password = ? WHERE id = ? AND tenant_id = ?", req.Username, req.WhatsApp, req.Email, hashedPassword, userID, tenantID)
 		} else {
-			authExec("UPDATE users SET username = ?, email = ? WHERE id = ? AND tenant_id = ?", req.Username, req.Email, userID, tenantID)
-		}
-
-		if err := setUserSystemPrompt(userID, tenantID, req.SystemPrompt); err != nil {
-			log.Println("Failed to save user system prompt (profile):", err)
-			return c.Status(500).JSON(fiber.Map{"error": "Gagal menyimpan prompt"})
+			authExec("UPDATE users SET username = ?, whatsapp_number = ?, email = ? WHERE id = ? AND tenant_id = ?", req.Username, req.WhatsApp, req.Email, userID, tenantID)
 		}
 		return c.JSON(fiber.Map{"success": true})
 	})
@@ -3043,24 +3078,27 @@ func callAI(userID, tenantID int, isAdmin bool, prompt string) string {
 		contextText = contextText[:15000]
 	}
 
-	sysPrompt := getUserSystemPrompt(userID, tenantID)
-	if sysPrompt == "" {
-		if isAdmin {
+	providerName, pConfig, cfgErr := getActiveProviderConfig(userID, tenantID, isAdmin)
+	if cfgErr != "" {
+		return cfgErr
+	}
+
+	sysPrompt := ""
+	if isAdmin {
+		sysPrompt = getUserSystemPrompt(userID, tenantID)
+		if sysPrompt == "" {
 			mu.Lock()
 			sysPrompt = cfg.SystemPrompt
 			mu.Unlock()
 		}
+	} else {
+		sysPrompt = defaultSystemPromptForProvider(providerName, pConfig.Model)
 	}
 	if sysPrompt == "" {
 		sysPrompt = "You are a helpful assistant."
 	}
 
 	fullPrompt := fmt.Sprintf("%s\n\nContext:\n%s\n\nUser Question: %s", sysPrompt, contextText, prompt)
-
-	providerName, pConfig, cfgErr := getActiveProviderConfig(userID, tenantID, isAdmin)
-	if cfgErr != "" {
-		return cfgErr
-	}
 
 	// 4. Call API
 	switch providerName {

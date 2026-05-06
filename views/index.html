@@ -558,12 +558,13 @@
                                 <input type="text" id="profile-username" required class="w-full p-3 bg-gray-50 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
                             </div>
                             <div>
-                                <label class="block text-sm font-medium text-gray-700 mb-1">Email</label>
-                                <input type="email" id="profile-email" placeholder="opsional" class="w-full p-3 bg-gray-50 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                                <label class="block text-sm font-medium text-gray-700 mb-1">Nomor WhatsApp (Wajib)</label>
+                                <input type="tel" id="profile-whatsapp" required placeholder="Contoh: 6281234567890 atau 081234567890" class="w-full p-3 bg-gray-50 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                                <p class="text-xs text-gray-400 mt-1">Dipakai untuk OTP WhatsApp.</p>
                             </div>
                             <div>
-                                <label class="block text-sm font-medium text-gray-700 mb-1">Prompt Pribadi (untuk akun ini)</label>
-                                <textarea id="profile-system-prompt" rows="5" class="w-full p-3 bg-gray-50 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none font-mono text-sm" placeholder="Kosongkan untuk memakai prompt global (admin)."></textarea>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                                <input type="email" id="profile-email" placeholder="opsional" class="w-full p-3 bg-gray-50 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
                             </div>
                             <div>
                                 <label class="block text-sm font-medium text-gray-700 mb-1">Password Baru</label>
@@ -2193,14 +2194,14 @@
                 if (res.ok) {
                     const user = await res.json();
                     document.getElementById('profile-username').value = user.username;
+                    const waEl = document.getElementById('profile-whatsapp');
+                    if (waEl) waEl.value = user.whatsapp_number || user.username || '';
                     const emailEl = document.getElementById('profile-email');
                     if (emailEl) emailEl.value = user.email || '';
                     const roleEl = document.getElementById('profile-role');
                     if (roleEl) roleEl.value = user.is_admin ? 'Admin' : 'User';
                     const tenantEl = document.getElementById('profile-tenant');
                     if (tenantEl) tenantEl.value = user.tenant_name ? `${user.tenant_name} (#${user.tenant_id})` : `Tenant #${user.tenant_id || ''}`;
-                    const promptEl = document.getElementById('profile-system-prompt');
-                    if (promptEl) promptEl.value = user.system_prompt || '';
                     document.getElementById('profile-password').value = ''; // Reset password field
                 }
             } catch (error) {
@@ -2211,8 +2212,8 @@
         async function saveProfile(event) {
             event.preventDefault();
             const username = document.getElementById('profile-username').value;
+            const whatsapp_number = document.getElementById('profile-whatsapp').value;
             const email = document.getElementById('profile-email').value;
-            const system_prompt = document.getElementById('profile-system-prompt').value;
             const password = document.getElementById('profile-password').value;
 
             if (!username) {
@@ -2224,7 +2225,7 @@
                 const res = await fetchAuth('/api/profile', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username, email, password, system_prompt })
+                    body: JSON.stringify({ username, whatsapp_number, email, password })
                 });
                 const data = await res.json();
 
