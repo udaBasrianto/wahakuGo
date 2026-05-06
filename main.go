@@ -1482,23 +1482,49 @@ func main() {
 		if !strings.HasPrefix(p, "/api/") {
 			return c.Next()
 		}
-		// Cek Origin atau Referer header
-		origin := c.Get("Origin")
-		referer := c.Get("Referer")
-		host := c.Hostname() // hostname dari request (sudah di-set Nginx via proxy_set_header Host)
+
+		origin := strings.TrimSpace(c.Get("Origin"))
+		referer := strings.TrimSpace(c.Get("Referer"))
+
+		// Jika tidak ada Origin maupun Referer sama sekali — tolak
+		// (browser selalu kirim salah satu untuk same-origin request)
 		if origin == "" && referer == "" {
-			// Tidak ada Origin/Referer — tolak
 			return c.Status(403).JSON(fiber.Map{"success": false, "message": "Forbidden: missing origin"})
 		}
-		// Validasi origin/referer harus sama-host
+
+		// Ambil nilai yang akan dicek
 		check := origin
 		if check == "" {
 			check = referer
 		}
+
+		// Parse dan validasi scheme — harus http atau https
+		// (bukan file://, chrome-extension://, dll)
 		u, err := url.Parse(check)
-		if err != nil || u.Hostname() != host {
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 			return c.Status(403).JSON(fiber.Map{"success": false, "message": "Forbidden: invalid origin"})
 		}
+
+		// Hostname dari Origin/Referer tidak boleh kosong
+		if u.Hostname() == "" {
+			return c.Status(403).JSON(fiber.Map{"success": false, "message": "Forbidden: empty origin host"})
+		}
+
+		// Cek apakah origin host sama dengan Host header yang dikirim Nginx
+		// Gunakan X-Forwarded-Host jika ada (lebih reliable di balik proxy)
+		expectedHost := strings.TrimSpace(c.Get("X-Forwarded-Host"))
+		if expectedHost == "" {
+			expectedHost = c.Hostname()
+		}
+		// Strip port dari expectedHost jika ada
+		if h, _, err2 := net.SplitHostPort(expectedHost); err2 == nil {
+			expectedHost = h
+		}
+
+		if expectedHost != "" && u.Hostname() != expectedHost {
+			return c.Status(403).JSON(fiber.Map{"success": false, "message": "Forbidden: origin mismatch"})
+		}
+
 		return c.Next()
 	})
 	app.Use(tenantMiddleware)
