@@ -1839,7 +1839,7 @@ func main() {
 
 			log.Printf("[OTP SUCCESS] UserID: %d. Activating user...", userID)
 
-			_, err := authExec("UPDATE users SET is_active = 1 WHERE id = ? AND tenant_id = ?", userID, tenantIDInt)
+			_, err := authExec("UPDATE users SET is_active = true WHERE id = ? AND tenant_id = ?", userID, tenantIDInt)
 			if err != nil {
 				log.Println("Failed to activate user:", err)
 			}
@@ -2785,13 +2785,13 @@ func main() {
 		}
 
 		// 1. Reset all for this user
-		_, err = authExec("UPDATE user_devices SET is_primary = 0 WHERE user_id = ? AND tenant_id = ?", userID, tenantID)
+		_, err = authExec("UPDATE user_devices SET is_primary = false WHERE user_id = ? AND tenant_id = ?", userID, tenantID)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": err.Error()})
 		}
 
 		// 2. Set new primary
-		_, err = authExec("UPDATE user_devices SET is_primary = 1 WHERE user_id = ? AND device_jid = ? AND tenant_id = ?", userID, jidStr, tenantID)
+		_, err = authExec("UPDATE user_devices SET is_primary = true WHERE user_id = ? AND device_jid = ? AND tenant_id = ?", userID, jidStr, tenantID)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": err.Error()})
 		}
