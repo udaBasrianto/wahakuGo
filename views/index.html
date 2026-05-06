@@ -5,30 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Dashboard</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🤖</text></svg>">
-    <script>
-        (function() {
-            function inject() {
-                if (window.__twInjected) return;
-                window.__twInjected = true;
-                var s = document.createElement('script');
-                s.src = 'https://cdn.tailwindcss.com';
-                document.head.appendChild(s);
-            }
-            window.__twFallback = inject;
-            window.addEventListener('load', function() {
-                setTimeout(function() {
-                    try {
-                        var bg = getComputedStyle(document.body).backgroundColor;
-                        if (!bg || bg === 'transparent' || bg === 'rgba(0, 0, 0, 0)') inject();
-                    } catch (e) {
-                        inject();
-                    }
-                }, 250);
-            });
-        })();
-    </script>
-    <link href="/styles.css?v=4.4" rel="stylesheet" onerror="window.__twFallback && window.__twFallback()">
-    <link href="/views/styles.css?v=4.4" rel="stylesheet" onerror="window.__twFallback && window.__twFallback()">
+    <style>html{visibility:hidden}</style>
+    <link href="/styles.css?v=4.5" rel="stylesheet" onload="document.documentElement.style.visibility='visible'" onerror="document.documentElement.style.visibility='visible'">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <style>
         .sidebar-transition { transition: transform 0.3s ease-in-out; }

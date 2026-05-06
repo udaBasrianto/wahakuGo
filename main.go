@@ -1398,6 +1398,9 @@ func main() {
 	app.Get("/dashboard", func(c *fiber.Ctx) error {
 		return c.SendFile("./views/index.html")
 	})
+	app.Get("/styles.css", func(c *fiber.Ctx) error {
+		return c.SendFile("./views/styles.css")
+	})
 	app.Static("/", "./views")
 	app.Static("/views", "./views")
 
