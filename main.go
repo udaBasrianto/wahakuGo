@@ -3487,9 +3487,8 @@ func main() {
 		if strings.TrimSpace(p.APIKey) == "" {
 			return c.Status(400).JSON(fiber.Map{"success": false, "message": "API Key wajib diisi untuk provider " + req.ActiveProvider})
 		}
-		if strings.TrimSpace(p.Model) == "" {
-			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Model wajib dipilih untuk provider " + req.ActiveProvider})
-		}
+		// Model boleh kosong — user bisa isi manual atau belum fetch models
+		// Hanya warn di log, tidak reject
 
 		if err := setUserAIConfig(userID, tenantID, req); err != nil {
 			log.Println("Failed to save user ai config:", err)

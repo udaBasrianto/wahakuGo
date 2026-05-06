@@ -2610,7 +2610,14 @@
                     const modelEl = document.getElementById(`model-${key}`);
                     const baseUrlEl = document.getElementById(`baseurl-${key}`);
                     if(apiKeyEl) currentConfig.providers[key].api_key = apiKeyEl.value;
-                    if(modelEl) currentConfig.providers[key].model = modelEl.value;
+                    if(modelEl) {
+                        // Jika select kosong, pertahankan nilai lama dari currentConfig
+                        const val = modelEl.value;
+                        if (val && val.trim() !== '') {
+                            currentConfig.providers[key].model = val;
+                        }
+                        // else: biarkan currentConfig.providers[key].model tetap seperti sebelumnya
+                    }
                     if(baseUrlEl) currentConfig.providers[key].base_url = baseUrlEl.value;
                 });
                 try {
