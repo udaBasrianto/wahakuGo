@@ -1760,15 +1760,23 @@ func main() {
 	// User Info
 	api.Get("/me", func(c *fiber.Ctx) error {
 		userID := c.Locals("userID").(int)
-		isAdmin := c.Locals("isAdmin").(bool)
 		tenantID := c.Locals("tenantID").(int)
-		var username string
-		authQueryRow("SELECT username FROM users WHERE id = ? AND tenant_id = ?", userID, tenantID).Scan(&username)
+		isAdmin, _ := c.Locals("isAdmin").(bool)
+
+		var username, email, tenantName string
+		var isActive bool
+		authQueryRow("SELECT COALESCE(username, ''), COALESCE(email, ''), COALESCE(is_active, FALSE) FROM users WHERE id = ? AND tenant_id = ?", userID, tenantID).Scan(&username, &email, &isActive)
+		authQueryRow("SELECT COALESCE(name, '') FROM tenants WHERE id = ?", tenantID).Scan(&tenantName)
 
 		return c.JSON(fiber.Map{
-			"id":       userID,
-			"username": username,
-			"is_admin": isAdmin,
+			"id":            userID,
+			"username":      username,
+			"email":         email,
+			"is_admin":      isAdmin,
+			"is_active":     isActive,
+			"tenant_id":     tenantID,
+			"tenant_name":   tenantName,
+			"system_prompt": getUserSystemPrompt(userID, tenantID),
 		})
 	})
 
@@ -1779,14 +1787,21 @@ func main() {
 	api.Post("/profile", func(c *fiber.Ctx) error {
 		userID := c.Locals("userID").(int)
 		var req struct {
-			Username string `json:"username"`
-			Password string `json:"password"`
+			Username     string `json:"username"`
+			Email        string `json:"email"`
+			Password     string `json:"password"`
+			SystemPrompt string `json:"system_prompt"`
 		}
 		if err := c.BodyParser(&req); err != nil {
 			return c.Status(400).JSON(fiber.Map{"error": "Invalid JSON"})
 		}
+		req.Username = strings.TrimSpace(req.Username)
+		req.Email = strings.TrimSpace(req.Email)
 		if req.Username == "" {
 			return c.Status(400).JSON(fiber.Map{"error": "Username cannot be empty"})
+		}
+		if req.Email != "" && !strings.Contains(req.Email, "@") {
+			return c.Status(400).JSON(fiber.Map{"error": "Email tidak valid"})
 		}
 		var count int
 		tenantID := c.Locals("tenantID").(int)
@@ -1795,16 +1810,31 @@ func main() {
 			return c.Status(400).JSON(fiber.Map{"error": "Username already taken"})
 		}
 
+		if req.Email != "" {
+			authQueryRow("SELECT COUNT(*) FROM users WHERE email = ? AND id != ? AND tenant_id = ?", req.Email, userID, tenantID).Scan(&count)
+			if count > 0 {
+				return c.Status(400).JSON(fiber.Map{"error": "Email sudah terpakai"})
+			}
+		}
+
 		if req.Password != "" {
+			if len(req.Password) < 8 {
+				return c.Status(400).JSON(fiber.Map{"error": "Password minimal 8 karakter"})
+			}
 			// Hash password before updating
 			hashedPassword, err := hashPassword(req.Password)
 			if err != nil {
 				log.Println("Failed to hash password during profile update:", err)
 				return c.Status(500).JSON(fiber.Map{"error": "Failed to process password"})
 			}
-			authExec("UPDATE users SET username = ?, password = ? WHERE id = ? AND tenant_id = ?", req.Username, hashedPassword, userID, tenantID)
+			authExec("UPDATE users SET username = ?, email = ?, password = ? WHERE id = ? AND tenant_id = ?", req.Username, req.Email, hashedPassword, userID, tenantID)
 		} else {
-			authExec("UPDATE users SET username = ? WHERE id = ? AND tenant_id = ?", req.Username, userID, tenantID)
+			authExec("UPDATE users SET username = ?, email = ? WHERE id = ? AND tenant_id = ?", req.Username, req.Email, userID, tenantID)
+		}
+
+		if err := setUserSystemPrompt(userID, tenantID, req.SystemPrompt); err != nil {
+			log.Println("Failed to save user system prompt (profile):", err)
+			return c.Status(500).JSON(fiber.Map{"error": "Gagal menyimpan prompt"})
 		}
 		return c.JSON(fiber.Map{"success": true})
 	})
