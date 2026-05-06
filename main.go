@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	crand "crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math/big"
 	"math/rand"
@@ -13,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -715,6 +718,207 @@ func httpClient(timeout time.Duration) *http.Client {
 		timeout = 30 * time.Second
 	}
 	return &http.Client{Timeout: timeout}
+}
+
+type aiMediaCommand struct {
+	ImageURL string `json:"url"`
+	Caption  string `json:"caption"`
+	Text     string `json:"text"`
+	Type     string `json:"type"`
+}
+
+func parseAIMediaCommand(reply string) (string, string, string) {
+	reply = strings.TrimSpace(reply)
+	if reply == "" {
+		return "", "", ""
+	}
+
+	var cmd aiMediaCommand
+	if strings.HasPrefix(reply, "{") && strings.HasSuffix(reply, "}") {
+		if err := json.Unmarshal([]byte(reply), &cmd); err == nil {
+			if strings.ToLower(strings.TrimSpace(cmd.Type)) == "image" && strings.TrimSpace(cmd.ImageURL) != "" {
+				caption := strings.TrimSpace(cmd.Caption)
+				if caption == "" {
+					caption = strings.TrimSpace(cmd.Text)
+				}
+				return strings.TrimSpace(cmd.ImageURL), caption, ""
+			}
+		}
+	}
+
+	lines := strings.Split(reply, "\n")
+	var imageURL string
+	var caption string
+	rest := make([]string, 0, len(lines))
+	for _, line := range lines {
+		raw := strings.TrimSpace(line)
+		upper := strings.ToUpper(raw)
+		switch {
+		case strings.HasPrefix(upper, "IMAGE_URL:") || strings.HasPrefix(upper, "IMAGE_URL=") || strings.HasPrefix(upper, "IMAGE:") || strings.HasPrefix(upper, "IMAGE="):
+			sep := strings.IndexAny(raw, ":=")
+			if sep >= 0 {
+				imageURL = strings.TrimSpace(raw[sep+1:])
+				continue
+			}
+		case strings.HasPrefix(upper, "CAPTION:") || strings.HasPrefix(upper, "CAPTION="):
+			sep := strings.IndexAny(raw, ":=")
+			if sep >= 0 {
+				caption = strings.TrimSpace(raw[sep+1:])
+				continue
+			}
+		}
+		rest = append(rest, line)
+	}
+
+	if strings.TrimSpace(imageURL) == "" {
+		return "", "", reply
+	}
+
+	if strings.TrimSpace(caption) == "" {
+		caption = strings.TrimSpace(strings.Join(rest, "\n"))
+	}
+	return strings.TrimSpace(imageURL), strings.TrimSpace(caption), ""
+}
+
+func loadImageBytes(imageURL string) ([]byte, string, error) {
+	imageURL = strings.TrimSpace(imageURL)
+	if imageURL == "" {
+		return nil, "", fmt.Errorf("image_url kosong")
+	}
+	if strings.HasPrefix(strings.ToLower(imageURL), "data:image/") {
+		comma := strings.Index(imageURL, ",")
+		if comma < 0 {
+			return nil, "", fmt.Errorf("data url tidak valid")
+		}
+		meta := imageURL[:comma]
+		b64 := imageURL[comma+1:]
+		if !strings.Contains(strings.ToLower(meta), ";base64") {
+			return nil, "", fmt.Errorf("data url harus base64")
+		}
+		data, err := base64.StdEncoding.DecodeString(b64)
+		if err != nil {
+			return nil, "", fmt.Errorf("decode base64 gagal")
+		}
+		mime := "image/jpeg"
+		if strings.HasPrefix(strings.ToLower(meta), "data:image/png") {
+			mime = "image/png"
+		} else if strings.HasPrefix(strings.ToLower(meta), "data:image/webp") {
+			mime = "image/webp"
+		}
+		return data, mime, nil
+	}
+	if strings.HasPrefix(imageURL, "/uploads/") {
+		name := path.Base(imageURL)
+		if name == "." || name == "/" || name == "" {
+			return nil, "", fmt.Errorf("path uploads tidak valid")
+		}
+		b, err := os.ReadFile(filepath.Join("uploads", name))
+		if err != nil {
+			return nil, "", fmt.Errorf("gagal baca file uploads")
+		}
+		return b, http.DetectContentType(b), nil
+	}
+
+	u, err := url.Parse(imageURL)
+	if err != nil {
+		return nil, "", fmt.Errorf("url tidak valid")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, "", fmt.Errorf("scheme url harus http/https")
+	}
+	if u.Host == "" {
+		return nil, "", fmt.Errorf("host url kosong")
+	}
+	if _, err := validateOutboundBaseURL(u.Scheme + "://" + u.Host); err != nil {
+		return nil, "", fmt.Errorf("host url tidak diizinkan")
+	}
+
+	client := httpClient(25 * time.Second)
+	req, err := http.NewRequest("GET", imageURL, nil)
+	if err != nil {
+		return nil, "", fmt.Errorf("request gagal")
+	}
+	req.Header.Set("User-Agent", "WahakuBot/1.0")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("gagal fetch image")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, "", fmt.Errorf("fetch image gagal (%d)", resp.StatusCode)
+	}
+
+	const maxSize = 5 * 1024 * 1024
+	limited := io.LimitReader(resp.Body, maxSize+1)
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, "", fmt.Errorf("gagal baca image")
+	}
+	if len(data) > maxSize {
+		return nil, "", fmt.Errorf("image terlalu besar (maks 5MB)")
+	}
+
+	mime := strings.TrimSpace(resp.Header.Get("Content-Type"))
+	if !strings.HasPrefix(strings.ToLower(mime), "image/") {
+		mime = http.DetectContentType(data)
+	}
+	if !strings.HasPrefix(strings.ToLower(mime), "image/") {
+		return nil, "", fmt.Errorf("bukan file gambar")
+	}
+	return data, mime, nil
+}
+
+func sendImageWithCaption(cli *whatsmeow.Client, to types.JID, imageBytes []byte, mimeType, caption string) error {
+	if cli == nil || !cli.IsConnected() {
+		return fmt.Errorf("client tidak terkoneksi")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+
+	up, err := cli.Upload(ctx, imageBytes, whatsmeow.MediaImage)
+	if err != nil {
+		return err
+	}
+
+	caption = strings.TrimSpace(caption)
+	img := &waE2E.ImageMessage{
+		Caption:       proto.String(caption),
+		Mimetype:      proto.String(strings.TrimSpace(mimeType)),
+		URL:           proto.String(up.URL),
+		DirectPath:    proto.String(up.DirectPath),
+		MediaKey:      up.MediaKey,
+		FileEncSHA256: up.FileEncSHA256,
+		FileSHA256:    up.FileSHA256,
+		FileLength:    proto.Uint64(uint64(up.FileLength)),
+	}
+	_, err = cli.SendMessage(ctx, to, &waE2E.Message{ImageMessage: img})
+	return err
+}
+
+func sendAIReply(cli *whatsmeow.Client, tenantID, userID int, to types.JID, reply string) error {
+	imageURL, caption, text := parseAIMediaCommand(reply)
+	if strings.TrimSpace(imageURL) != "" {
+		b, mime, err := loadImageBytes(imageURL)
+		if err != nil {
+			return err
+		}
+		if err := sendImageWithCaption(cli, to, b, mime, caption); err != nil {
+			return err
+		}
+		recordMessageEvent(tenantID, userID, to.String(), "out", time.Now())
+		return nil
+	}
+	msg := strings.TrimSpace(text)
+	if msg == "" {
+		msg = strings.TrimSpace(reply)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err := cli.SendMessage(ctx, to, &waE2E.Message{Conversation: &msg})
+	if err == nil {
+		recordMessageEvent(tenantID, userID, to.String(), "out", time.Now())
+	}
+	return err
 }
 
 func rebindQuery(query string) string {
@@ -3310,18 +3514,27 @@ func handleUserEvent(userID int, cli *whatsmeow.Client, evt interface{}) {
 			reply := callAI(userID, tenantID, isAdmin, msg)
 			log.Printf("[User %d] AI Reply generated (len=%d)", userID, len(reply))
 
+			imageURL, caption, text := parseAIMediaCommand(reply)
 			historyMutex.Lock()
-			chatHistories[userChatKey] = append(chatHistories[userChatKey], "Assistant: "+reply)
+			if strings.TrimSpace(imageURL) != "" {
+				if strings.TrimSpace(caption) != "" {
+					chatHistories[userChatKey] = append(chatHistories[userChatKey], "Assistant: "+caption)
+				} else {
+					chatHistories[userChatKey] = append(chatHistories[userChatKey], "Assistant: [image]")
+				}
+			} else {
+				if strings.TrimSpace(text) == "" {
+					chatHistories[userChatKey] = append(chatHistories[userChatKey], "Assistant: "+reply)
+				} else {
+					chatHistories[userChatKey] = append(chatHistories[userChatKey], "Assistant: "+text)
+				}
+			}
 			historyMutex.Unlock()
 
-			// Reply using the SAME client that received the message
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			_, sendErr := cli.SendMessage(ctx, v.Info.Chat, &waE2E.Message{Conversation: &reply})
+			sendErr := sendAIReply(cli, tenantID, userID, v.Info.Chat, reply)
 			if sendErr != nil {
 				log.Printf("[User %d] Failed to send reply: %v", userID, sendErr)
 			} else {
-				recordMessageEvent(tenantID, userID, v.Info.Chat.String(), "out", time.Now())
 				log.Printf("[User %d] Message sent successfully to %s", userID, v.Info.Chat.User)
 			}
 
@@ -3935,11 +4148,7 @@ func processFollowups() {
 			cli := getUserClient(t.UserID)
 			if cli != nil && cli.IsConnected() {
 				remoteJID, _ := types.ParseJID(t.JID)
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				_, sendErr := cli.SendMessage(ctx, remoteJID, &waE2E.Message{Conversation: &reply})
-				cancel()
-				if sendErr == nil {
-					recordMessageEvent(t.TenantID, t.UserID, t.JID, "out", time.Now())
+				if sendErr := sendAIReply(cli, t.TenantID, t.UserID, remoteJID, reply); sendErr == nil {
 					authExec("UPDATE followup_tasks SET status = 'completed' WHERE id = ? AND tenant_id = ?", t.ID, t.TenantID)
 				} else {
 					log.Println("Failed to send followup task:", t.ID, "err:", sendErr)
