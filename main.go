@@ -1424,6 +1424,17 @@ func main() {
 	app := fiber.New(fiber.Config{
 		BodyLimit: 10 * 1024 * 1024, // 10MB Limit
 	})
+
+	// Serve static files FIRST — before any middleware so CSS/JS always loads
+	app.Static("/views", "./views", fiber.Static{
+		CacheDuration: 24 * time.Hour,
+		MaxAge:        86400,
+	})
+	app.Static("/uploads", "./uploads")
+	app.Get("/styles.css", func(c *fiber.Ctx) error {
+		return c.SendFile("./views/styles.css")
+	})
+
 	app.Use(func(c *fiber.Ctx) error {
 		p := strings.ToLower(c.Path())
 		if strings.Contains(p, "..") {
@@ -1451,6 +1462,22 @@ func main() {
 		CookieHTTPOnly: false, // Must be readable by JavaScript
 		CookieSecure:   isProduction(),
 		CookieSameSite: "Lax",
+		Next: func(c *fiber.Ctx) bool {
+			// Skip CSRF for GET/HEAD/OPTIONS (safe methods) and static assets
+			method := c.Method()
+			if method == "GET" || method == "HEAD" || method == "OPTIONS" {
+				return true
+			}
+			// Skip CSRF for static file extensions
+			p := c.Path()
+			if strings.HasSuffix(p, ".css") || strings.HasSuffix(p, ".js") ||
+				strings.HasSuffix(p, ".png") || strings.HasSuffix(p, ".jpg") ||
+				strings.HasSuffix(p, ".ico") || strings.HasSuffix(p, ".svg") ||
+				strings.HasSuffix(p, ".woff") || strings.HasSuffix(p, ".woff2") {
+				return true
+			}
+			return false
+		},
 		ErrorHandler: func(c *fiber.Ctx, err error) error {
 			if c.Accepts("application/json") == "application/json" {
 				return c.Status(403).JSON(fiber.Map{
@@ -1545,7 +1572,7 @@ func main() {
 	// Ensure uploads directory exists
 	os.MkdirAll("uploads", 0755)
 
-	// Serve Static Files
+	// Serve HTML pages
 	app.Get("/", func(c *fiber.Ctx) error {
 		return c.SendFile("./views/landing.html")
 	})
@@ -1558,11 +1585,6 @@ func main() {
 	app.Get("/dashboard", func(c *fiber.Ctx) error {
 		return c.SendFile("./views/index.html")
 	})
-	app.Get("/styles.css", func(c *fiber.Ctx) error {
-		return c.SendFile("./views/styles.css")
-	})
-	app.Static("/", "./views")
-	app.Static("/views", "./views")
 
 	// API Routes
 	api := app.Group("/api")
