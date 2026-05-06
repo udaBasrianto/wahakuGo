@@ -3054,6 +3054,19 @@ func main() {
 
 	billing := api.Group("/billing")
 
+	// Middleware: billing actions (invoice, proof) hanya untuk admin tenant
+	// Status, plans, bank info boleh dilihat semua user
+	billingAdminOnly := func(c *fiber.Ctx) error {
+		isAdmin, ok := c.Locals("isAdmin").(bool)
+		if !ok || !isAdmin {
+			return c.Status(403).JSON(fiber.Map{
+				"success": false,
+				"message": "Hanya admin tenant yang dapat mengelola billing.",
+			})
+		}
+		return c.Next()
+	}
+
 	billing.Get("/bank", func(c *fiber.Ctx) error {
 		mu.Lock()
 		enabled := cfg.BillingEnabled
@@ -3131,7 +3144,7 @@ func main() {
 		})
 	})
 
-	billing.Get("/invoices", func(c *fiber.Ctx) error {
+	billing.Get("/invoices", billingAdminOnly, func(c *fiber.Ctx) error {
 		mu.Lock()
 		enabled := cfg.BillingEnabled
 		mu.Unlock()
@@ -3154,7 +3167,7 @@ func main() {
 		return c.JSON(fiber.Map{"success": true, "invoices": invoices})
 	})
 
-	billing.Post("/invoice", func(c *fiber.Ctx) error {
+	billing.Post("/invoice", billingAdminOnly, func(c *fiber.Ctx) error {
 		mu.Lock()
 		enabled := cfg.BillingEnabled
 		mu.Unlock()
@@ -3207,7 +3220,7 @@ func main() {
 		})
 	})
 
-	billing.Post("/invoice/:id/proof", func(c *fiber.Ctx) error {
+	billing.Post("/invoice/:id/proof", billingAdminOnly, func(c *fiber.Ctx) error {
 		mu.Lock()
 		enabled := cfg.BillingEnabled
 		bankEnabled := cfg.BillingBankEnabled
@@ -3254,7 +3267,7 @@ func main() {
 		return c.JSON(fiber.Map{"success": true})
 	})
 
-	billing.Get("/invoice/:id/proof", func(c *fiber.Ctx) error {
+	billing.Get("/invoice/:id/proof", billingAdminOnly, func(c *fiber.Ctx) error {
 		mu.Lock()
 		enabled := cfg.BillingEnabled
 		bankEnabled := cfg.BillingBankEnabled
