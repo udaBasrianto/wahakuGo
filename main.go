@@ -81,6 +81,7 @@ type Config struct {
 	BrandingName   string                    `json:"branding_name"`
 	BrandingLogo   string                    `json:"branding_logo"`
 	BrandingVersion string                   `json:"branding_version"`
+	OTPEnabled     bool                      `json:"otp_enabled"`
 	SystemPrompt   string                    `json:"system_prompt"`
 	SavedPrompts   map[string]string         `json:"saved_prompts"`
 	KnowledgeURLs  []string                  `json:"knowledge_urls"`
@@ -279,6 +280,16 @@ func isProduction() bool {
 func envBool(name string) bool {
 	val := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
 	return val == "1" || val == "true" || val == "yes" || val == "y" || val == "on"
+}
+
+func otpDisabled() bool {
+	if envBool("DISABLE_OTP") {
+		return true
+	}
+	mu.Lock()
+	enabled := cfg.OTPEnabled
+	mu.Unlock()
+	return !enabled
 }
 
 func columnExists(db *sql.DB, table, column string) bool {
@@ -1175,7 +1186,7 @@ func main() {
 			return c.JSON(fiber.Map{"success": true, "message": message})
 		}
 
-		if envBool("DISABLE_OTP") {
+		if otpDisabled() {
 			return finalizeLogin("Login berhasil (OTP dimatikan sementara).")
 		}
 
@@ -1244,7 +1255,7 @@ func main() {
 	})
 
 	auth.Post("/verify", func(c *fiber.Ctx) error {
-		if envBool("DISABLE_OTP") {
+		if otpDisabled() {
 			return c.Status(400).JSON(fiber.Map{"success": false, "message": "OTP sedang dimatikan sementara"})
 		}
 		var req struct {
@@ -1328,7 +1339,7 @@ func main() {
 
 	// Resend OTP endpoint
 	auth.Post("/resend-otp", func(c *fiber.Ctx) error {
-		if envBool("DISABLE_OTP") {
+		if otpDisabled() {
 			return c.Status(400).JSON(fiber.Map{"success": false, "message": "OTP sedang dimatikan sementara"})
 		}
 		sess, err := sessionStore.Get(c)
@@ -1469,7 +1480,7 @@ func main() {
 			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Nomor WhatsApp atau Email sudah terdaftar"})
 		}
 
-		if envBool("DISABLE_OTP") {
+		if otpDisabled() {
 			_, _ = authExec("UPDATE users SET is_active = ? WHERE username = ? AND tenant_id = ?", true, req.Username, tenantID)
 			return c.JSON(fiber.Map{"success": true, "require_otp": false, "message": "Pendaftaran berhasil (OTP dimatikan sementara). Silakan login."})
 		}
@@ -3301,30 +3312,31 @@ func callBytePlus(apiKey, model, baseURL, prompt string) string {
 // I will include the missing helper functions below to ensure the file is complete.
 
 func loadConfig() {
-	file, err := os.Open(configFile)
+	raw, err := os.ReadFile(configFile)
 	if err != nil {
 		cfg = Config{
-			AppPort:       "4500",
-			AdminUsername: "admin",
-			BrandingName:  "Wahaku",
-			BrandingLogo:  "",
+			AppPort:         "4500",
+			AdminUsername:   "admin",
+			BrandingName:    "Wahaku",
+			BrandingLogo:    "",
 			BrandingVersion: buildVersion,
-			Providers:     make(map[string]ProviderConfig),
-			SavedPrompts:  make(map[string]string),
+			OTPEnabled:      true,
+			Providers:       make(map[string]ProviderConfig),
+			SavedPrompts:    make(map[string]string),
 		}
 		saveConfig()
 		return
 	}
-	defer file.Close()
-	if err := json.NewDecoder(file).Decode(&cfg); err != nil {
+	if err := json.Unmarshal(raw, &cfg); err != nil {
 		cfg = Config{
-			AppPort:       "4500",
-			AdminUsername: "admin",
-			BrandingName:  "Wahaku",
-			BrandingLogo:  "",
+			AppPort:         "4500",
+			AdminUsername:   "admin",
+			BrandingName:    "Wahaku",
+			BrandingLogo:    "",
 			BrandingVersion: buildVersion,
-			Providers:     make(map[string]ProviderConfig),
-			SavedPrompts:  make(map[string]string),
+			OTPEnabled:      true,
+			Providers:       make(map[string]ProviderConfig),
+			SavedPrompts:    make(map[string]string),
 		}
 		saveConfig()
 		return
@@ -3333,6 +3345,9 @@ func loadConfig() {
 	// Ensure defaults
 	if cfg.AppPort == "" {
 		cfg.AppPort = "4500"
+	}
+	if !bytes.Contains(raw, []byte(`"otp_enabled"`)) {
+		cfg.OTPEnabled = true
 	}
 	if cfg.Providers == nil {
 		cfg.Providers = make(map[string]ProviderConfig)

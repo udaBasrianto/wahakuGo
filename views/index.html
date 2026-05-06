@@ -186,6 +186,19 @@
                                 <i class="fas fa-plus"></i> Tambah
                             </button>
                         </div>
+
+                        <div id="otp-toggle-container" class="px-6 pt-5 hidden">
+                            <div class="flex items-center justify-between bg-gray-50 border border-gray-100 rounded-xl p-4">
+                                <div class="pr-4">
+                                    <p class="text-sm font-semibold text-gray-800">OTP Login</p>
+                                    <p class="text-xs text-gray-500 mt-1">Jika aktif, login/register butuh verifikasi OTP lewat WhatsApp.</p>
+                                </div>
+                                <div class="flex items-center gap-2">
+                                    <input type="checkbox" id="otp_enabled" class="h-5 w-5 text-blue-600 rounded border-gray-300">
+                                    <span class="text-sm text-gray-700">Aktif</span>
+                                </div>
+                            </div>
+                        </div>
                         
                         <!-- QR Area -->
                         <div id="qr-area" class="hidden p-8 bg-gray-50 border-b border-gray-100 text-center animate-pulse">
@@ -1111,6 +1124,16 @@
         function renderUI() {
             if (!currentConfig || Object.keys(currentConfig).length === 0) return;
 
+            const otpContainer = document.getElementById('otp-toggle-container');
+            if (otpContainer) {
+                if (currentIsAdmin) otpContainer.classList.remove('hidden');
+                else otpContainer.classList.add('hidden');
+            }
+            const otpEnabledEl = document.getElementById('otp_enabled');
+            if (otpEnabledEl) {
+                otpEnabledEl.checked = currentConfig.otp_enabled !== false;
+            }
+
             if (typeof currentConfig.branding_name === 'string') {
                 const el = document.getElementById('branding_name');
                 if (el) el.value = currentConfig.branding_name || '';
@@ -2013,6 +2036,9 @@
             }
             const groupRadios = document.getElementsByName('group_mode');
             groupRadios.forEach(radio => { if (radio.checked) currentConfig.group_mode = radio.value; });
+
+            const otpEnabledEl = document.getElementById('otp_enabled');
+            if (otpEnabledEl) currentConfig.otp_enabled = !!otpEnabledEl.checked;
             
             // Gather Providers
             Object.keys(currentConfig.providers).forEach(key => {
