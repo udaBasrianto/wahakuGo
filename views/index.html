@@ -5,7 +5,30 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Dashboard</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🤖</text></svg>">
-    <link href="/styles.css?v=4.3" rel="stylesheet">
+    <script>
+        (function() {
+            function inject() {
+                if (window.__twInjected) return;
+                window.__twInjected = true;
+                var s = document.createElement('script');
+                s.src = 'https://cdn.tailwindcss.com';
+                document.head.appendChild(s);
+            }
+            window.__twFallback = inject;
+            window.addEventListener('load', function() {
+                setTimeout(function() {
+                    try {
+                        var bg = getComputedStyle(document.body).backgroundColor;
+                        if (!bg || bg === 'transparent' || bg === 'rgba(0, 0, 0, 0)') inject();
+                    } catch (e) {
+                        inject();
+                    }
+                }, 250);
+            });
+        })();
+    </script>
+    <link href="/styles.css?v=4.4" rel="stylesheet" onerror="window.__twFallback && window.__twFallback()">
+    <link href="/views/styles.css?v=4.4" rel="stylesheet" onerror="window.__twFallback && window.__twFallback()">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <style>
         .sidebar-transition { transition: transform 0.3s ease-in-out; }
@@ -621,6 +644,41 @@
                             </button>
                         </div>
                         <div id="billing-status" class="text-sm text-gray-600">Memuat status...</div>
+                    </div>
+
+                    <div id="billing-admin-settings" class="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 max-w-4xl hidden">
+                        <div class="flex items-center justify-between mb-4">
+                            <h4 class="text-sm font-bold text-gray-700">Pengaturan Pembayaran (Platform Admin)</h4>
+                            <button onclick="saveBillingSettings()" class="text-blue-600 hover:bg-blue-50 px-3 py-2 rounded-lg transition text-sm font-semibold">
+                                <i class="fas fa-save mr-2"></i> Simpan
+                            </button>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <label class="flex items-center gap-2 text-sm text-gray-700">
+                                <input id="billing-enabled" type="checkbox" class="rounded border-gray-300">
+                                <span>Aktifkan fitur billing</span>
+                            </label>
+                            <label class="flex items-center gap-2 text-sm text-gray-700">
+                                <input id="billing-bank-enabled" type="checkbox" class="rounded border-gray-300">
+                                <span>Aktifkan transfer bank</span>
+                            </label>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">Nama Bank</label>
+                                <input id="billing-bank-name" type="text" class="w-full p-3 bg-gray-50 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">No Rekening</label>
+                                <input id="billing-bank-account" type="text" class="w-full p-3 bg-gray-50 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">Atas Nama</label>
+                                <input id="billing-bank-holder" type="text" class="w-full p-3 bg-gray-50 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">Catatan</label>
+                                <input id="billing-notes" type="text" class="w-full p-3 bg-gray-50 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                            </div>
+                        </div>
                     </div>
 
                     <div class="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 max-w-4xl">
@@ -1309,6 +1367,13 @@
                 if (statusRes.ok) {
                     const data = await statusRes.json();
                     if (data && data.success) {
+                        if (data.billing_enabled === false) {
+                            statusEl.innerHTML = `<span class="px-2.5 py-1 text-xs font-bold rounded-full bg-gray-100 text-gray-700">Billing Nonaktif</span>`;
+                            bankEl.innerHTML = '<div class="text-gray-500">Metode pembayaran dinonaktifkan admin.</div>';
+                            planEl.innerHTML = '<option value="">-</option>';
+                            invoicesEl.innerHTML = '<div class="py-6 text-center text-gray-400">Billing nonaktif.</div>';
+                            return;
+                        }
                         const sub = data.subscription || {};
                         const active = !!data.active;
                         const until = sub.current_period_end ? new Date(sub.current_period_end).toLocaleString() : '';
@@ -1358,6 +1423,59 @@
             } catch (e) {
                 statusEl.textContent = e.message || 'Gagal memuat billing.';
                 invoicesEl.innerHTML = '<div class="py-6 text-center text-gray-400">Gagal memuat invoice.</div>';
+            }
+        }
+
+        async function loadBillingSettings() {
+            const box = document.getElementById('billing-admin-settings');
+            if (!box || !currentUser || !currentUser.is_platform_admin) return;
+            try {
+                const res = await fetchAuth('/api/admin/billing/settings');
+                const data = await res.json();
+                if (!res.ok || !data.success) throw new Error(data.message || 'Gagal memuat setting billing');
+                const s = data.settings || {};
+                const elEnabled = document.getElementById('billing-enabled');
+                const elBankEnabled = document.getElementById('billing-bank-enabled');
+                const elBankName = document.getElementById('billing-bank-name');
+                const elBankAccount = document.getElementById('billing-bank-account');
+                const elBankHolder = document.getElementById('billing-bank-holder');
+                const elNotes = document.getElementById('billing-notes');
+                if (elEnabled) elEnabled.checked = !!s.billing_enabled;
+                if (elBankEnabled) elBankEnabled.checked = !!s.billing_bank_enabled;
+                if (elBankName) elBankName.value = s.billing_bank_name || '';
+                if (elBankAccount) elBankAccount.value = s.billing_bank_account || '';
+                if (elBankHolder) elBankHolder.value = s.billing_bank_holder || '';
+                if (elNotes) elNotes.value = s.billing_notes || '';
+            } catch (e) {}
+        }
+
+        async function saveBillingSettings() {
+            if (!currentUser || !currentUser.is_platform_admin) return;
+            const elEnabled = document.getElementById('billing-enabled');
+            const elBankEnabled = document.getElementById('billing-bank-enabled');
+            const elBankName = document.getElementById('billing-bank-name');
+            const elBankAccount = document.getElementById('billing-bank-account');
+            const elBankHolder = document.getElementById('billing-bank-holder');
+            const elNotes = document.getElementById('billing-notes');
+            try {
+                const res = await fetchAuth('/api/admin/billing/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        billing_enabled: elEnabled ? !!elEnabled.checked : true,
+                        billing_bank_enabled: elBankEnabled ? !!elBankEnabled.checked : true,
+                        billing_bank_name: elBankName ? elBankName.value : '',
+                        billing_bank_account: elBankAccount ? elBankAccount.value : '',
+                        billing_bank_holder: elBankHolder ? elBankHolder.value : '',
+                        billing_notes: elNotes ? elNotes.value : ''
+                    })
+                });
+                const data = await res.json();
+                if (!res.ok || !data.success) throw new Error(data.message || 'Gagal menyimpan');
+                Swal.fire('Sukses', 'Setting pembayaran tersimpan', 'success');
+                loadBilling();
+            } catch (e) {
+                Swal.fire('Gagal', e.message || 'Gagal menyimpan', 'error');
             }
         }
 
@@ -1554,6 +1672,11 @@
                         isAdmin = !!me.is_admin;
                         currentIsAdmin = isAdmin;
                         ensureUserTimezoneSaved();
+                        if (me.is_platform_admin) {
+                            const box = document.getElementById('billing-admin-settings');
+                            if (box) box.classList.remove('hidden');
+                            loadBillingSettings();
+                        }
                         if (me.is_admin) {
                             const navUsers = document.getElementById('nav-users');
                             if (navUsers) navUsers.classList.remove('hidden');

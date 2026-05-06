@@ -85,6 +85,8 @@ type Config struct {
 	BrandingName   string                    `json:"branding_name"`
 	BrandingLogo   string                    `json:"branding_logo"`
 	BrandingVersion string                   `json:"branding_version"`
+	BillingEnabled     bool   `json:"billing_enabled"`
+	BillingBankEnabled bool   `json:"billing_bank_enabled"`
 	BillingBankName    string `json:"billing_bank_name"`
 	BillingBankAccount string `json:"billing_bank_account"`
 	BillingBankHolder  string `json:"billing_bank_holder"`
@@ -969,6 +971,17 @@ func requireAdmin(c *fiber.Ctx) error {
 	return c.Status(403).JSON(fiber.Map{"success": false, "message": "Requires Admin privileges"})
 }
 
+func requirePlatformAdmin(c *fiber.Ctx) error {
+	if isAdmin, ok := c.Locals("isAdmin").(bool); !ok || !isAdmin {
+		return c.Status(403).JSON(fiber.Map{"success": false, "message": "Requires Admin privileges"})
+	}
+	userID := c.Locals("userID").(int)
+	if !isPlatformAdminUser(userID) {
+		return c.Status(403).JSON(fiber.Map{"success": false, "message": "Requires Platform Admin privileges"})
+	}
+	return c.Next()
+}
+
 // Tenant identification middleware
 func tenantMiddleware(c *fiber.Ctx) error {
 	// 1. Check if user is logged in (session exists)
@@ -1386,6 +1399,7 @@ func main() {
 		return c.SendFile("./views/index.html")
 	})
 	app.Static("/", "./views")
+	app.Static("/views", "./views")
 
 	// API Routes
 	api := app.Group("/api")
@@ -2259,6 +2273,7 @@ func main() {
 			"timezone":      strings.TrimSpace(tz),
 			"email":         email,
 			"is_admin":      isAdmin,
+			"is_platform_admin": isPlatformAdminUser(userID),
 			"is_active":     isActive,
 			"tenant_id":     tenantID,
 			"tenant_name":   tenantName,
@@ -2767,6 +2782,13 @@ func main() {
 
 	billing.Get("/bank", func(c *fiber.Ctx) error {
 		mu.Lock()
+		enabled := cfg.BillingEnabled
+		bankEnabled := cfg.BillingBankEnabled
+		mu.Unlock()
+		if !enabled || !bankEnabled {
+			return c.Status(404).JSON(fiber.Map{"success": false, "message": "Metode pembayaran tidak tersedia"})
+		}
+		mu.Lock()
 		bankName := strings.TrimSpace(cfg.BillingBankName)
 		bankAcc := strings.TrimSpace(cfg.BillingBankAccount)
 		bankHolder := strings.TrimSpace(cfg.BillingBankHolder)
@@ -2786,6 +2808,12 @@ func main() {
 	})
 
 	billing.Get("/plans", func(c *fiber.Ctx) error {
+		mu.Lock()
+		enabled := cfg.BillingEnabled
+		mu.Unlock()
+		if !enabled {
+			return c.Status(404).JSON(fiber.Map{"success": false, "message": "Billing nonaktif"})
+		}
 		rows, err := authQuery("SELECT id, name, price_idr, limits_json, is_active FROM subscription_plans WHERE is_active = ? ORDER BY price_idr ASC", true)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Database error"})
@@ -2802,6 +2830,10 @@ func main() {
 	})
 
 	billing.Get("/status", func(c *fiber.Ctx) error {
+		mu.Lock()
+		billingEnabled := cfg.BillingEnabled
+		bankEnabled := cfg.BillingBankEnabled
+		mu.Unlock()
 		tenantID := c.Locals("tenantID").(int)
 		ensureTenantSubscription(tenantID)
 		sub, ok := getTenantSubscription(tenantID)
@@ -2812,6 +2844,8 @@ func main() {
 		return c.JSON(fiber.Map{
 			"success": true,
 			"active":  active,
+			"billing_enabled": billingEnabled,
+			"bank_enabled":    bankEnabled,
 			"subscription": fiber.Map{
 				"tenant_id":           sub.TenantID,
 				"plan_id":             sub.PlanID,
@@ -2824,6 +2858,12 @@ func main() {
 	})
 
 	billing.Get("/invoices", func(c *fiber.Ctx) error {
+		mu.Lock()
+		enabled := cfg.BillingEnabled
+		mu.Unlock()
+		if !enabled {
+			return c.Status(404).JSON(fiber.Map{"success": false, "message": "Billing nonaktif"})
+		}
 		tenantID := c.Locals("tenantID").(int)
 		rows, err := authQuery("SELECT id, tenant_id, plan_id, amount_idr, status, period_start, period_end, COALESCE(proof_file, ''), COALESCE(note, ''), created_at, COALESCE(paid_at, ?) FROM subscription_invoices WHERE tenant_id = ? ORDER BY id DESC LIMIT 20", time.Time{}, tenantID)
 		if err != nil {
@@ -2841,6 +2881,12 @@ func main() {
 	})
 
 	billing.Post("/invoice", func(c *fiber.Ctx) error {
+		mu.Lock()
+		enabled := cfg.BillingEnabled
+		mu.Unlock()
+		if !enabled {
+			return c.Status(404).JSON(fiber.Map{"success": false, "message": "Billing nonaktif"})
+		}
 		tenantID := c.Locals("tenantID").(int)
 		ensureTenantSubscription(tenantID)
 		var req struct {
@@ -2888,6 +2934,13 @@ func main() {
 	})
 
 	billing.Post("/invoice/:id/proof", func(c *fiber.Ctx) error {
+		mu.Lock()
+		enabled := cfg.BillingEnabled
+		bankEnabled := cfg.BillingBankEnabled
+		mu.Unlock()
+		if !enabled || !bankEnabled {
+			return c.Status(404).JSON(fiber.Map{"success": false, "message": "Metode pembayaran tidak tersedia"})
+		}
 		tenantID := c.Locals("tenantID").(int)
 		id, _ := strconv.Atoi(c.Params("id"))
 		if id <= 0 {
@@ -2928,6 +2981,13 @@ func main() {
 	})
 
 	billing.Get("/invoice/:id/proof", func(c *fiber.Ctx) error {
+		mu.Lock()
+		enabled := cfg.BillingEnabled
+		bankEnabled := cfg.BillingBankEnabled
+		mu.Unlock()
+		if !enabled || !bankEnabled {
+			return c.SendStatus(404)
+		}
 		tenantID := c.Locals("tenantID").(int)
 		id, _ := strconv.Atoi(c.Params("id"))
 		if id <= 0 {
@@ -2947,7 +3007,55 @@ func main() {
 		return c.SendFile(filepath.Join("uploads", "billing", safe))
 	})
 
-	adminBilling := api.Group("/admin/billing", requireAdmin)
+	adminBilling := api.Group("/admin/billing", requirePlatformAdmin)
+	adminBilling.Get("/settings", func(c *fiber.Ctx) error {
+		mu.Lock()
+		settings := fiber.Map{
+			"billing_enabled":      cfg.BillingEnabled,
+			"billing_bank_enabled": cfg.BillingBankEnabled,
+			"billing_bank_name":    strings.TrimSpace(cfg.BillingBankName),
+			"billing_bank_account": strings.TrimSpace(cfg.BillingBankAccount),
+			"billing_bank_holder":  strings.TrimSpace(cfg.BillingBankHolder),
+			"billing_notes":        strings.TrimSpace(cfg.BillingNotes),
+		}
+		mu.Unlock()
+		return c.JSON(fiber.Map{"success": true, "settings": settings})
+	})
+	adminBilling.Post("/settings", func(c *fiber.Ctx) error {
+		var req struct {
+			BillingEnabled     *bool  `json:"billing_enabled"`
+			BankEnabled        *bool  `json:"billing_bank_enabled"`
+			BankName           string `json:"billing_bank_name"`
+			BankAccount        string `json:"billing_bank_account"`
+			BankHolder         string `json:"billing_bank_holder"`
+			Notes              string `json:"billing_notes"`
+		}
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid JSON"})
+		}
+		mu.Lock()
+		if req.BillingEnabled != nil {
+			cfg.BillingEnabled = *req.BillingEnabled
+		}
+		if req.BankEnabled != nil {
+			cfg.BillingBankEnabled = *req.BankEnabled
+		}
+		if req.BankName != "" || bytes.Contains(c.Body(), []byte(`"billing_bank_name"`)) {
+			cfg.BillingBankName = strings.TrimSpace(req.BankName)
+		}
+		if req.BankAccount != "" || bytes.Contains(c.Body(), []byte(`"billing_bank_account"`)) {
+			cfg.BillingBankAccount = strings.TrimSpace(req.BankAccount)
+		}
+		if req.BankHolder != "" || bytes.Contains(c.Body(), []byte(`"billing_bank_holder"`)) {
+			cfg.BillingBankHolder = strings.TrimSpace(req.BankHolder)
+		}
+		if req.Notes != "" || bytes.Contains(c.Body(), []byte(`"billing_notes"`)) {
+			cfg.BillingNotes = strings.TrimSpace(req.Notes)
+		}
+		mu.Unlock()
+		saveConfig()
+		return c.JSON(fiber.Map{"success": true})
+	})
 	adminBilling.Get("/invoices", func(c *fiber.Ctx) error {
 		status := strings.TrimSpace(c.Query("status", ""))
 		limit, _ := strconv.Atoi(c.Query("limit", "50"))
@@ -4390,6 +4498,8 @@ func loadConfig() {
 			BrandingName:    "Wahaku",
 			BrandingLogo:    "",
 			BrandingVersion: buildVersion,
+			BillingEnabled:     true,
+			BillingBankEnabled: true,
 			OTPEnabled:      true,
 			Providers:       make(map[string]ProviderConfig),
 			SavedPrompts:    make(map[string]string),
@@ -4418,6 +4528,12 @@ func loadConfig() {
 	}
 	if !bytes.Contains(raw, []byte(`"otp_enabled"`)) {
 		cfg.OTPEnabled = true
+	}
+	if !bytes.Contains(raw, []byte(`"billing_enabled"`)) {
+		cfg.BillingEnabled = true
+	}
+	if !bytes.Contains(raw, []byte(`"billing_bank_enabled"`)) {
+		cfg.BillingBankEnabled = true
 	}
 	if cfg.Providers == nil {
 		cfg.Providers = make(map[string]ProviderConfig)
