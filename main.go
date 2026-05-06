@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -134,6 +135,7 @@ type User struct {
 	ID       int    `json:"id"`
 	Username string `json:"username"`
 	WhatsApp string `json:"whatsapp_number"`
+	Timezone string `json:"timezone"`
 	Email    string `json:"email"`
 	Password string `json:"password"`
 	IsAdmin  bool   `json:"is_admin"`
@@ -303,6 +305,22 @@ func otpDisabled() bool {
 	return !enabled
 }
 
+func getUserTimeLocation(userID, tenantID int) *time.Location {
+	var tz string
+	if err := authQueryRow("SELECT COALESCE(timezone, '') FROM users WHERE id = ? AND tenant_id = ?", userID, tenantID).Scan(&tz); err != nil {
+		return time.Local
+	}
+	tz = strings.TrimSpace(tz)
+	if tz == "" {
+		return time.Local
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		return time.Local
+	}
+	return loc
+}
+
 func columnExists(db *sql.DB, table, column string) bool {
 	var count int
 	if authDialect == "postgres" {
@@ -343,6 +361,7 @@ func initAuthSchema() error {
 				tenant_id INTEGER NOT NULL DEFAULT 1 REFERENCES tenants(id),
 				username TEXT NOT NULL,
 				whatsapp_number TEXT,
+				timezone TEXT,
 				email TEXT,
 				password TEXT,
 				is_admin BOOLEAN NOT NULL DEFAULT FALSE,
@@ -418,6 +437,7 @@ func initAuthSchema() error {
 		tenant_id INTEGER NOT NULL DEFAULT 1,
 		username TEXT UNIQUE,
 		whatsapp_number TEXT,
+		timezone TEXT,
 		email TEXT,
 		password TEXT,
 		is_admin BOOLEAN DEFAULT 0,
@@ -871,6 +891,11 @@ func main() {
 	log.Println("Auth storage dialect:", authDialect)
 
 	ensureColumn(authDB, "users", "whatsapp_number", "ALTER TABLE users ADD COLUMN whatsapp_number TEXT")
+	if authDialect == "postgres" {
+		ensureColumn(authDB, "users", "timezone", "ALTER TABLE users ADD COLUMN timezone TEXT")
+	} else {
+		ensureColumn(authDB, "users", "timezone", "ALTER TABLE users ADD COLUMN timezone TEXT")
+	}
 
 	if authDialect == "sqlite" {
 		ensureColumn(authDB, "users", "tenant_id", "ALTER TABLE users ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1")
@@ -1732,12 +1757,15 @@ func main() {
 			req.JID = normalizeWhatsAppNumber(req.JID) + "@s.whatsapp.net"
 		}
 
+		nowUTC := time.Now().UTC()
 		var scheduledTime time.Time
 		if req.ScheduledTime != "" {
-			if t, err := time.Parse(time.RFC3339, req.ScheduledTime); err == nil {
-				scheduledTime = t
-			} else if t, err := time.ParseInLocation("2006-01-02T15:04", req.ScheduledTime, time.Local); err == nil {
-				scheduledTime = t
+			if t, err := time.Parse(time.RFC3339Nano, req.ScheduledTime); err == nil {
+				scheduledTime = t.UTC()
+			} else if t, err := time.Parse(time.RFC3339, req.ScheduledTime); err == nil {
+				scheduledTime = t.UTC()
+			} else if t, err := time.ParseInLocation("2006-01-02T15:04", req.ScheduledTime, getUserTimeLocation(userID, tenantID)); err == nil {
+				scheduledTime = t.UTC()
 			} else {
 				return c.Status(400).JSON(fiber.Map{"success": false, "message": "Format scheduled_time tidak valid"})
 			}
@@ -1745,11 +1773,11 @@ func main() {
 			if req.DelayMinutes <= 0 {
 				req.DelayMinutes = 60
 			}
-			scheduledTime = time.Now().Add(time.Duration(req.DelayMinutes) * time.Minute)
+			scheduledTime = nowUTC.Add(time.Duration(req.DelayMinutes) * time.Minute)
 		}
 
-		if scheduledTime.Before(time.Now().Add(30 * time.Second)) {
-			scheduledTime = time.Now().Add(1 * time.Minute)
+		if scheduledTime.Before(nowUTC.Add(30 * time.Second)) {
+			scheduledTime = nowUTC.Add(1 * time.Minute)
 		}
 		_, err := authExec("INSERT INTO followup_tasks (tenant_id, user_id, jid, scheduled_time, instruction, status) VALUES (?, ?, ?, ?, ?, 'pending')",
 			tenantID, userID, req.JID, scheduledTime, req.Instruction)
@@ -1952,9 +1980,9 @@ func main() {
 		tenantID := c.Locals("tenantID").(int)
 		isAdmin, _ := c.Locals("isAdmin").(bool)
 
-		var username, whatsappNumber, email, tenantName string
+		var username, whatsappNumber, email, tenantName, tz string
 		var isActive bool
-		authQueryRow("SELECT COALESCE(username, ''), COALESCE(whatsapp_number, ''), COALESCE(email, ''), COALESCE(is_active, FALSE) FROM users WHERE id = ? AND tenant_id = ?", userID, tenantID).Scan(&username, &whatsappNumber, &email, &isActive)
+		authQueryRow("SELECT COALESCE(username, ''), COALESCE(whatsapp_number, ''), COALESCE(timezone, ''), COALESCE(email, ''), COALESCE(is_active, FALSE) FROM users WHERE id = ? AND tenant_id = ?", userID, tenantID).Scan(&username, &whatsappNumber, &tz, &email, &isActive)
 		authQueryRow("SELECT COALESCE(name, '') FROM tenants WHERE id = ?", tenantID).Scan(&tenantName)
 		if strings.TrimSpace(whatsappNumber) == "" {
 			whatsappNumber = username
@@ -1964,6 +1992,7 @@ func main() {
 			"id":            userID,
 			"username":      username,
 			"whatsapp_number": whatsappNumber,
+			"timezone":      strings.TrimSpace(tz),
 			"email":         email,
 			"is_admin":      isAdmin,
 			"is_active":     isActive,
@@ -1981,6 +2010,7 @@ func main() {
 		var req struct {
 			Username     string `json:"username"`
 			WhatsApp     string `json:"whatsapp_number"`
+			Timezone     string `json:"timezone"`
 			Email        string `json:"email"`
 			Password     string `json:"password"`
 		}
@@ -1989,6 +2019,7 @@ func main() {
 		}
 		req.Username = strings.TrimSpace(req.Username)
 		req.WhatsApp = normalizeWhatsAppNumber(req.WhatsApp)
+		req.Timezone = strings.TrimSpace(req.Timezone)
 		req.Email = strings.TrimSpace(req.Email)
 		if req.Username == "" {
 			return c.Status(400).JSON(fiber.Map{"error": "Username cannot be empty"})
@@ -2002,8 +2033,17 @@ func main() {
 		if req.Email != "" && !strings.Contains(req.Email, "@") {
 			return c.Status(400).JSON(fiber.Map{"error": "Email tidak valid"})
 		}
+		if req.Timezone != "" {
+			if _, err := time.LoadLocation(req.Timezone); err != nil {
+				return c.Status(400).JSON(fiber.Map{"error": "Timezone tidak valid"})
+			}
+		}
 		var count int
 		tenantID := c.Locals("tenantID").(int)
+		if req.Timezone == "" {
+			_ = authQueryRow("SELECT COALESCE(timezone, '') FROM users WHERE id = ? AND tenant_id = ?", userID, tenantID).Scan(&req.Timezone)
+			req.Timezone = strings.TrimSpace(req.Timezone)
+		}
 		authQueryRow("SELECT COUNT(*) FROM users WHERE username = ? AND id != ? AND tenant_id = ?", req.Username, userID, tenantID).Scan(&count)
 		if count > 0 {
 			return c.Status(400).JSON(fiber.Map{"error": "Username already taken"})
@@ -2031,9 +2071,31 @@ func main() {
 				log.Println("Failed to hash password during profile update:", err)
 				return c.Status(500).JSON(fiber.Map{"error": "Failed to process password"})
 			}
-			authExec("UPDATE users SET username = ?, whatsapp_number = ?, email = ?, password = ? WHERE id = ? AND tenant_id = ?", req.Username, req.WhatsApp, req.Email, hashedPassword, userID, tenantID)
+			authExec("UPDATE users SET username = ?, whatsapp_number = ?, timezone = ?, email = ?, password = ? WHERE id = ? AND tenant_id = ?", req.Username, req.WhatsApp, req.Timezone, req.Email, hashedPassword, userID, tenantID)
 		} else {
-			authExec("UPDATE users SET username = ?, whatsapp_number = ?, email = ? WHERE id = ? AND tenant_id = ?", req.Username, req.WhatsApp, req.Email, userID, tenantID)
+			authExec("UPDATE users SET username = ?, whatsapp_number = ?, timezone = ?, email = ? WHERE id = ? AND tenant_id = ?", req.Username, req.WhatsApp, req.Timezone, req.Email, userID, tenantID)
+		}
+		return c.JSON(fiber.Map{"success": true})
+	})
+
+	api.Post("/profile/timezone", func(c *fiber.Ctx) error {
+		userID := c.Locals("userID").(int)
+		tenantID := c.Locals("tenantID").(int)
+		var req struct {
+			Timezone string `json:"timezone"`
+		}
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid JSON"})
+		}
+		req.Timezone = strings.TrimSpace(req.Timezone)
+		if req.Timezone == "" {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "timezone wajib diisi"})
+		}
+		if _, err := time.LoadLocation(req.Timezone); err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Timezone tidak valid"})
+		}
+		if _, err := authExec("UPDATE users SET timezone = ? WHERE id = ? AND tenant_id = ?", req.Timezone, userID, tenantID); err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Database error"})
 		}
 		return c.JSON(fiber.Map{"success": true})
 	})
@@ -2254,6 +2316,108 @@ func main() {
 			// Legacy format (without userID prefix) - skip for multi-tenancy
 		}
 		return c.JSON(fiber.Map{"success": true, "contacts": contacts})
+	})
+
+	api.Get("/wa/contacts", func(c *fiber.Ctx) error {
+		userID := c.Locals("userID").(int)
+		tenantID := c.Locals("tenantID").(int)
+		cli := getPrimaryUserClient(userID, tenantID)
+		if cli == nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "WhatsApp belum terkoneksi"})
+		}
+		all, err := cli.Store.Contacts.GetAllContacts(context.Background())
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Gagal mengambil kontak"})
+		}
+		contacts := make([]fiber.Map, 0, len(all))
+		for jid, info := range all {
+			name := strings.TrimSpace(info.FullName)
+			if name == "" {
+				name = strings.TrimSpace(info.PushName)
+			}
+			if name == "" {
+				name = strings.TrimSpace(info.BusinessName)
+			}
+			if name == "" {
+				name = strings.TrimSpace(info.FirstName)
+			}
+			contacts = append(contacts, fiber.Map{
+				"jid":  jid.String(),
+				"name": name,
+			})
+		}
+		sort.Slice(contacts, func(i, j int) bool {
+			ni, _ := contacts[i]["name"].(string)
+			nj, _ := contacts[j]["name"].(string)
+			ni = strings.ToLower(strings.TrimSpace(ni))
+			nj = strings.ToLower(strings.TrimSpace(nj))
+			if ni == "" && nj != "" {
+				return false
+			}
+			if ni != "" && nj == "" {
+				return true
+			}
+			if ni != nj {
+				return ni < nj
+			}
+			ji, _ := contacts[i]["jid"].(string)
+			jj, _ := contacts[j]["jid"].(string)
+			return ji < jj
+		})
+		return c.JSON(fiber.Map{"success": true, "contacts": contacts})
+	})
+
+	api.Get("/wa/groups", func(c *fiber.Ctx) error {
+		userID := c.Locals("userID").(int)
+		tenantID := c.Locals("tenantID").(int)
+		cli := getPrimaryUserClient(userID, tenantID)
+		if cli == nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "WhatsApp belum terkoneksi"})
+		}
+		groups, err := cli.GetJoinedGroups(context.Background())
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Gagal mengambil grup"})
+		}
+		resp := make([]fiber.Map, 0, len(groups))
+		for _, g := range groups {
+			if g == nil {
+				continue
+			}
+			participants := make([]fiber.Map, 0, len(g.Participants))
+			for _, p := range g.Participants {
+				display := strings.TrimSpace(p.DisplayName)
+				participants = append(participants, fiber.Map{
+					"jid":          p.JID.String(),
+					"display_name": display,
+					"is_admin":     p.IsAdmin,
+					"is_superadmin": p.IsSuperAdmin,
+				})
+			}
+			resp = append(resp, fiber.Map{
+				"jid":          g.JID.String(),
+				"name":         strings.TrimSpace(g.Name),
+				"participants": participants,
+			})
+		}
+		sort.Slice(resp, func(i, j int) bool {
+			ni, _ := resp[i]["name"].(string)
+			nj, _ := resp[j]["name"].(string)
+			ni = strings.ToLower(strings.TrimSpace(ni))
+			nj = strings.ToLower(strings.TrimSpace(nj))
+			if ni == "" && nj != "" {
+				return false
+			}
+			if ni != "" && nj == "" {
+				return true
+			}
+			if ni != nj {
+				return ni < nj
+			}
+			ji, _ := resp[i]["jid"].(string)
+			jj, _ := resp[j]["jid"].(string)
+			return ji < jj
+		})
+		return c.JSON(fiber.Map{"success": true, "groups": resp})
 	})
 
 	api.Get("/user/config", func(c *fiber.Ctx) error {
@@ -2819,6 +2983,19 @@ func getUserClient(userID int) *whatsmeow.Client {
 		}
 	}
 	return nil
+}
+
+func getPrimaryUserClient(userID, tenantID int) *whatsmeow.Client {
+	var primaryJID string
+	if err := authQueryRow("SELECT device_jid FROM user_devices WHERE user_id = ? AND is_primary = ? AND tenant_id = ?", userID, true, tenantID).Scan(&primaryJID); err == nil {
+		primaryJID = strings.TrimSpace(primaryJID)
+		if primaryJID != "" {
+			if cli := getUserDeviceClient(userID, primaryJID); cli != nil {
+				return cli
+			}
+		}
+	}
+	return getUserClient(userID)
 }
 
 func startAllUserDevices(userID int, tenantID int) {

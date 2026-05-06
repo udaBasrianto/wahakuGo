@@ -568,8 +568,17 @@
                         <form onsubmit="scheduleFollowup(event)" class="grid grid-cols-1 md:grid-cols-2 gap-4">
                             <div>
                                 <label class="block text-sm font-medium text-gray-700 mb-1">JID / Nomor Tujuan</label>
-                                <input id="followup-jid" type="text" required placeholder="Contoh: 62812xxxxxx@s.whatsapp.net atau 62812xxxxxx" class="w-full p-3 bg-gray-50 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                                <input id="followup-jid" type="text" list="followup-targets" required placeholder="Contoh: 62812xxxxxx@s.whatsapp.net atau 62812xxxxxx" class="w-full p-3 bg-gray-50 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                                <datalist id="followup-targets"></datalist>
                                 <p class="text-xs text-gray-400 mt-1">Bisa paste dari Chat Logs (jid).</p>
+                                <div class="mt-3 grid grid-cols-1 gap-2">
+                                    <select id="followup-group" onchange="onFollowupGroupChange()" class="w-full p-3 bg-gray-50 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                                        <option value="">Pilih grup WA (opsional)</option>
+                                    </select>
+                                    <select id="followup-participant" onchange="onFollowupParticipantChange()" class="w-full p-3 bg-gray-50 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" disabled>
+                                        <option value="">Pilih member grup (opsional)</option>
+                                    </select>
+                                </div>
                             </div>
                             <div>
                                 <label class="block text-sm font-medium text-gray-700 mb-1">Waktu Kirim</label>
@@ -760,6 +769,10 @@
         // Data Globals
         let currentConfig = {};
         let currentIsAdmin = false;
+        let currentUser = null;
+        let waContactsCache = [];
+        let waGroupsCache = [];
+        let waTargetsLoadedAt = 0;
         const providerModelDetails = {};
 
         const vertexRegions = [
@@ -899,7 +912,10 @@
             if(id === 'users') loadUsers();
             if(id === 'profile') loadProfile();
             if(id === 'chatlogs') loadChatContacts();
-            if(id === 'followup') loadFollowups();
+            if(id === 'followup') {
+                loadFollowups();
+                loadWAFollowupTargets();
+            }
         }
 
         function toggleSidebar() {
@@ -1086,6 +1102,123 @@
             }
         }
 
+        function detectBrowserTimezone() {
+            try {
+                const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+                return (tz || '').trim();
+            } catch (e) {
+                return '';
+            }
+        }
+
+        async function ensureUserTimezoneSaved() {
+            const tz = detectBrowserTimezone();
+            if (!tz) return;
+            if (!currentUser || currentUser.timezone) return;
+            try {
+                await fetchAuth('/api/profile/timezone', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ timezone: tz })
+                });
+                currentUser.timezone = tz;
+            } catch (e) {}
+        }
+
+        async function loadWAFollowupTargets(force = false) {
+            const now = Date.now();
+            if (!force && waTargetsLoadedAt && (now - waTargetsLoadedAt) < 60_000) return;
+
+            const groupSelect = document.getElementById('followup-group');
+            const participantSelect = document.getElementById('followup-participant');
+            const datalist = document.getElementById('followup-targets');
+            if (!groupSelect || !participantSelect || !datalist) return;
+
+            try {
+                const [contactsRes, groupsRes] = await Promise.all([
+                    fetchAuth('/api/wa/contacts'),
+                    fetchAuth('/api/wa/groups')
+                ]);
+
+                if (contactsRes.ok) {
+                    const contactsData = await contactsRes.json();
+                    if (contactsData && contactsData.success && Array.isArray(contactsData.contacts)) {
+                        waContactsCache = contactsData.contacts;
+                    }
+                }
+                if (groupsRes.ok) {
+                    const groupsData = await groupsRes.json();
+                    if (groupsData && groupsData.success && Array.isArray(groupsData.groups)) {
+                        waGroupsCache = groupsData.groups;
+                    }
+                }
+
+                datalist.innerHTML = '';
+                waContactsCache.forEach(c => {
+                    const opt = document.createElement('option');
+                    opt.value = c.jid || '';
+                    const label = (c.name || '').trim();
+                    if (label) opt.label = label;
+                    datalist.appendChild(opt);
+                });
+                waGroupsCache.forEach(g => {
+                    const opt = document.createElement('option');
+                    opt.value = g.jid || '';
+                    const label = (g.name || '').trim();
+                    if (label) opt.label = `GRUP: ${label}`;
+                    datalist.appendChild(opt);
+                });
+
+                groupSelect.innerHTML = '<option value="">Pilih grup WA (opsional)</option>';
+                waGroupsCache.forEach(g => {
+                    const opt = document.createElement('option');
+                    opt.value = g.jid || '';
+                    opt.textContent = (g.name || g.jid || '').trim();
+                    groupSelect.appendChild(opt);
+                });
+
+                participantSelect.innerHTML = '<option value="">Pilih member grup (opsional)</option>';
+                participantSelect.disabled = true;
+                waTargetsLoadedAt = now;
+            } catch (e) {}
+        }
+
+        function onFollowupGroupChange() {
+            const groupSelect = document.getElementById('followup-group');
+            const participantSelect = document.getElementById('followup-participant');
+            const jidInput = document.getElementById('followup-jid');
+            if (!groupSelect || !participantSelect || !jidInput) return;
+
+            const groupJID = (groupSelect.value || '').trim();
+            participantSelect.innerHTML = '<option value="">Pilih member grup (opsional)</option>';
+            participantSelect.disabled = true;
+
+            if (!groupJID) return;
+
+            jidInput.value = groupJID;
+            const g = waGroupsCache.find(x => (x.jid || '').trim() === groupJID);
+            if (!g || !Array.isArray(g.participants)) return;
+
+            g.participants.forEach(p => {
+                const pj = (p.jid || '').trim();
+                if (!pj) return;
+                const opt = document.createElement('option');
+                opt.value = pj;
+                const dn = (p.display_name || '').trim();
+                opt.textContent = dn ? `${dn} (${pj})` : pj;
+                participantSelect.appendChild(opt);
+            });
+            participantSelect.disabled = false;
+        }
+
+        function onFollowupParticipantChange() {
+            const participantSelect = document.getElementById('followup-participant');
+            const jidInput = document.getElementById('followup-jid');
+            if (!participantSelect || !jidInput) return;
+            const pj = (participantSelect.value || '').trim();
+            if (pj) jidInput.value = pj;
+        }
+
         async function loadFollowups() {
             const el = document.getElementById('followup-list');
             if (!el) return;
@@ -1194,7 +1327,10 @@
                     // if (meRes.status === 401) { ... } // Handled by fetchAuth
                     if (meRes.ok) {
                         const me = await meRes.json();
+                        currentUser = me;
                         isAdmin = !!me.is_admin;
+                        currentIsAdmin = isAdmin;
+                        ensureUserTimezoneSaved();
                         if (me.is_admin) {
                             const navUsers = document.getElementById('nav-users');
                             if (navUsers) navUsers.classList.remove('hidden');
