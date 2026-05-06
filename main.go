@@ -411,6 +411,15 @@ func initAuthSchema() error {
 				repeat_until TIMESTAMPTZ,
 				last_run TIMESTAMPTZ
 			)`,
+			`CREATE TABLE IF NOT EXISTS message_events (
+				id SERIAL PRIMARY KEY,
+				tenant_id INTEGER NOT NULL DEFAULT 1 REFERENCES tenants(id),
+				user_id INTEGER REFERENCES users(id),
+				chat_jid TEXT,
+				direction TEXT NOT NULL,
+				created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+			)`,
+			`CREATE INDEX IF NOT EXISTS message_events_tenant_user_time_idx ON message_events(tenant_id, user_id, created_at)`,
 			`CREATE TABLE IF NOT EXISTS tenant_knowledge_files (
 				id SERIAL PRIMARY KEY,
 				tenant_id INTEGER NOT NULL REFERENCES tenants(id),
@@ -492,6 +501,17 @@ func initAuthSchema() error {
 		FOREIGN KEY(tenant_id) REFERENCES tenants(id),
 		FOREIGN KEY(user_id) REFERENCES users(id)
 	);
+	CREATE TABLE IF NOT EXISTS message_events (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		tenant_id INTEGER NOT NULL DEFAULT 1,
+		user_id INTEGER,
+		chat_jid TEXT,
+		direction TEXT NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY(tenant_id) REFERENCES tenants(id),
+		FOREIGN KEY(user_id) REFERENCES users(id)
+	);
+	CREATE INDEX IF NOT EXISTS message_events_tenant_user_time_idx ON message_events(tenant_id, user_id, created_at);
 	CREATE TABLE IF NOT EXISTS tenant_knowledge_files (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		tenant_id INTEGER NOT NULL,
@@ -2420,6 +2440,85 @@ func main() {
 		return c.JSON(fiber.Map{"success": true, "groups": resp})
 	})
 
+	api.Get("/stats/messages", func(c *fiber.Ctx) error {
+		userID := c.Locals("userID").(int)
+		tenantID := c.Locals("tenantID").(int)
+		days, _ := strconv.Atoi(strings.TrimSpace(c.Query("days", "7")))
+		if days <= 0 {
+			days = 7
+		}
+		if days > 60 {
+			days = 60
+		}
+
+		loc := getUserTimeLocation(userID, tenantID)
+		nowLocal := time.Now().In(loc)
+		endExclusiveLocal := time.Date(nowLocal.Year(), nowLocal.Month(), nowLocal.Day()+1, 0, 0, 0, 0, loc)
+		startLocalBase := nowLocal.AddDate(0, 0, -(days - 1))
+		startLocal := time.Date(startLocalBase.Year(), startLocalBase.Month(), startLocalBase.Day(), 0, 0, 0, 0, loc)
+
+		startUTC := startLocal.UTC()
+		endUTC := endExclusiveLocal.UTC()
+
+		type counts struct {
+			In  int
+			Out int
+		}
+		byDay := make(map[string]*counts, days)
+		for i := 0; i < days; i++ {
+			d := startLocal.AddDate(0, 0, i)
+			key := d.Format("2006-01-02")
+			byDay[key] = &counts{}
+		}
+
+		rows, err := authQuery(
+			"SELECT direction, created_at FROM message_events WHERE user_id = ? AND tenant_id = ? AND created_at >= ? AND created_at < ?",
+			userID, tenantID, startUTC, endUTC,
+		)
+		if err == nil && rows != nil {
+			for rows.Next() {
+				var direction string
+				var ts time.Time
+				if scanErr := rows.Scan(&direction, &ts); scanErr != nil {
+					continue
+				}
+				key := ts.In(loc).Format("2006-01-02")
+				if cday, ok := byDay[key]; ok {
+					switch strings.ToLower(strings.TrimSpace(direction)) {
+					case "in":
+						cday.In++
+					case "out":
+						cday.Out++
+					}
+				}
+			}
+			rows.Close()
+		}
+
+		categories := make([]string, 0, days)
+		incoming := make([]int, 0, days)
+		outgoing := make([]int, 0, days)
+		for i := 0; i < days; i++ {
+			d := startLocal.AddDate(0, 0, i)
+			key := d.Format("2006-01-02")
+			categories = append(categories, d.Format("02 Jan"))
+			if cday := byDay[key]; cday != nil {
+				incoming = append(incoming, cday.In)
+				outgoing = append(outgoing, cday.Out)
+			} else {
+				incoming = append(incoming, 0)
+				outgoing = append(outgoing, 0)
+			}
+		}
+
+		return c.JSON(fiber.Map{
+			"success":    true,
+			"categories": categories,
+			"incoming":  incoming,
+			"outgoing":  outgoing,
+		})
+	})
+
 	api.Get("/user/config", func(c *fiber.Ctx) error {
 		userID := c.Locals("userID").(int)
 		tenantID := c.Locals("tenantID").(int)
@@ -2998,6 +3097,22 @@ func getPrimaryUserClient(userID, tenantID int) *whatsmeow.Client {
 	return getUserClient(userID)
 }
 
+func recordMessageEvent(tenantID, userID int, chatJID, direction string, createdAt time.Time) {
+	chatJID = strings.TrimSpace(chatJID)
+	direction = strings.ToLower(strings.TrimSpace(direction))
+	if direction != "in" && direction != "out" {
+		return
+	}
+	if createdAt.IsZero() {
+		createdAt = time.Now()
+	}
+	createdAt = createdAt.UTC()
+	_, _ = authExec(
+		"INSERT INTO message_events (tenant_id, user_id, chat_jid, direction, created_at) VALUES (?, ?, ?, ?, ?)",
+		tenantID, userID, chatJID, direction, createdAt,
+	)
+}
+
 func startAllUserDevices(userID int, tenantID int) {
 	rows, err := authQuery("SELECT device_jid FROM user_devices WHERE user_id = ? AND tenant_id = ?", userID, tenantID)
 	if err != nil {
@@ -3148,6 +3263,13 @@ func handleUserEvent(userID int, cli *whatsmeow.Client, evt interface{}) {
 
 		log.Printf("[User %d][%s] Received message (len=%d)", userID, key, len(msg))
 
+		var tenantID int
+		_ = authQueryRow("SELECT tenant_id FROM users WHERE id = ?", userID).Scan(&tenantID)
+		if tenantID <= 0 {
+			tenantID = 1
+		}
+		recordMessageEvent(tenantID, userID, v.Info.Chat.String(), "in", v.Info.Timestamp)
+
 		// History
 		chatID := v.Info.Chat.String()
 		userChatKey := fmt.Sprintf("%d:%s", userID, chatID)
@@ -3163,13 +3285,11 @@ func handleUserEvent(userID int, cli *whatsmeow.Client, evt interface{}) {
 		go func() {
 			log.Printf("[User %d] Processing message (len=%d)", userID, len(msg))
 
-			// Get tenant ID for this user
-			var tenantID int
 			var isAdmin bool
 			err := authQueryRow("SELECT tenant_id, COALESCE(is_admin, FALSE) FROM users WHERE id = ?", userID).Scan(&tenantID, &isAdmin)
 			if err != nil {
 				log.Println("Error getting tenant for user", userID, ":", err)
-				tenantID = 1 // fallback
+				tenantID = 1
 				isAdmin = false
 			}
 
@@ -3201,6 +3321,7 @@ func handleUserEvent(userID int, cli *whatsmeow.Client, evt interface{}) {
 			if sendErr != nil {
 				log.Printf("[User %d] Failed to send reply: %v", userID, sendErr)
 			} else {
+				recordMessageEvent(tenantID, userID, v.Info.Chat.String(), "out", time.Now())
 				log.Printf("[User %d] Message sent successfully to %s", userID, v.Info.Chat.User)
 			}
 
@@ -3814,9 +3935,15 @@ func processFollowups() {
 			cli := getUserClient(t.UserID)
 			if cli != nil && cli.IsConnected() {
 				remoteJID, _ := types.ParseJID(t.JID)
-				cli.SendMessage(context.Background(), remoteJID, &waE2E.Message{Conversation: &reply})
-
-				authExec("UPDATE followup_tasks SET status = 'completed' WHERE id = ? AND tenant_id = ?", t.ID, t.TenantID)
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				_, sendErr := cli.SendMessage(ctx, remoteJID, &waE2E.Message{Conversation: &reply})
+				cancel()
+				if sendErr == nil {
+					recordMessageEvent(t.TenantID, t.UserID, t.JID, "out", time.Now())
+					authExec("UPDATE followup_tasks SET status = 'completed' WHERE id = ? AND tenant_id = ?", t.ID, t.TenantID)
+				} else {
+					log.Println("Failed to send followup task:", t.ID, "err:", sendErr)
+				}
 			} else {
 				log.Println("User client not connected for task:", t.ID)
 				// Retry later? Or mark failed?

@@ -2548,17 +2548,33 @@
         }
 
         // --- CHART ---
-        function renderChart() {
+        async function renderChart() {
             const chartEl = document.querySelector("#messageChart");
             if(!chartEl) return;
             chartEl.innerHTML = "";
             
+            let categories = ['Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab', 'Min'];
+            let incoming = [0, 0, 0, 0, 0, 0, 0];
+            let outgoing = [0, 0, 0, 0, 0, 0, 0];
+
+            try {
+                const res = await fetchAuth('/api/stats/messages?days=7');
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data && data.success && Array.isArray(data.categories) && Array.isArray(data.incoming) && Array.isArray(data.outgoing)) {
+                        categories = data.categories;
+                        incoming = data.incoming;
+                        outgoing = data.outgoing;
+                    }
+                }
+            } catch (e) {}
+
             const options = {
-                series: [{ name: 'Pesan Masuk', data: [30, 40, 35, 50, 49, 60, 70] }, { name: 'Pesan Keluar', data: [20, 30, 25, 40, 39, 50, 60] }],
+                series: [{ name: 'Pesan Masuk', data: incoming }, { name: 'Pesan Keluar', data: outgoing }],
                 chart: { height: 300, type: 'area', toolbar: { show: false } },
                 dataLabels: { enabled: false },
                 stroke: { curve: 'smooth' },
-                xaxis: { categories: ['Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab', 'Min'] },
+                xaxis: { categories },
             };
             var chart = new ApexCharts(chartEl, options);
             chart.render();
