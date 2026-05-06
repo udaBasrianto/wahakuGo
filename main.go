@@ -1426,14 +1426,26 @@ func main() {
 	})
 
 	// Serve static files FIRST — before any middleware so CSS/JS always loads
-	app.Static("/views", "./views", fiber.Static{
-		CacheDuration: 24 * time.Hour,
-		MaxAge:        86400,
+	// Explicit handler for styles.css with query string support (e.g. ?v=4.6)
+	app.Use(func(c *fiber.Ctx) error {
+		p := c.Path()
+		// Serve CSS directly — bypass all middleware
+		if p == "/views/styles.css" || p == "/styles.css" {
+			c.Set("Content-Type", "text/css; charset=utf-8")
+			c.Set("Cache-Control", "public, max-age=86400")
+			return c.SendFile("./views/styles.css")
+		}
+		// Serve other static assets under /views/
+		if strings.HasPrefix(p, "/views/") {
+			ext := strings.ToLower(filepath.Ext(p))
+			switch ext {
+			case ".css", ".js", ".png", ".jpg", ".jpeg", ".svg", ".ico", ".woff", ".woff2":
+				return c.SendFile("." + p)
+			}
+		}
+		return c.Next()
 	})
 	app.Static("/uploads", "./uploads")
-	app.Get("/styles.css", func(c *fiber.Ctx) error {
-		return c.SendFile("./views/styles.css")
-	})
 
 	app.Use(func(c *fiber.Ctx) error {
 		p := strings.ToLower(c.Path())
