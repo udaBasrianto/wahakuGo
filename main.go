@@ -30,7 +30,6 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
-	"github.com/gofiber/fiber/v2/middleware/csrf"
 	"github.com/gofiber/fiber/v2/middleware/session"
 	_ "github.com/lib/pq" // PostgreSQL Driver
 	"go.mau.fi/whatsmeow"
@@ -1467,44 +1466,41 @@ func main() {
 		AllowCredentials: true,
 	}))
 
-	// CSRF Protection for state-changing endpoints
-	csrfMiddleware := csrf.New(csrf.Config{
-		KeyLookup:      "header:X-CSRF-Token",
-		CookieName:     "csrf_token",
-		CookieHTTPOnly: false, // Must be readable by JavaScript
-		CookieSecure:   isProduction(),
-		CookieSameSite: "Lax",
-		Next: func(c *fiber.Ctx) bool {
-			// Skip CSRF for GET/HEAD/OPTIONS (safe methods) and static assets
-			method := c.Method()
-			if method == "GET" || method == "HEAD" || method == "OPTIONS" {
-				return true
-			}
-			// Skip CSRF for static file extensions
-			p := c.Path()
-			if strings.HasSuffix(p, ".css") || strings.HasSuffix(p, ".js") ||
-				strings.HasSuffix(p, ".png") || strings.HasSuffix(p, ".jpg") ||
-				strings.HasSuffix(p, ".ico") || strings.HasSuffix(p, ".svg") ||
-				strings.HasSuffix(p, ".woff") || strings.HasSuffix(p, ".woff2") {
-				return true
-			}
-			// Skip CSRF for auth endpoints — protected by rate limiting + account lockout
-			if strings.HasPrefix(p, "/api/auth/") {
-				return true
-			}
-			return false
-		},
-		ErrorHandler: func(c *fiber.Ctx, err error) error {
-			if c.Accepts("application/json") == "application/json" {
-				return c.Status(403).JSON(fiber.Map{
-					"success": false,
-					"message": "CSRF token invalid or missing",
-				})
-			}
-			return c.Status(403).SendString("CSRF token invalid or missing")
-		},
+	// CSRF Protection: cek Origin/Referer untuk POST/PUT/DELETE
+	// Lebih reliable di balik reverse proxy dibanding cookie-based CSRF
+	app.Use(func(c *fiber.Ctx) error {
+		method := c.Method()
+		if method != "POST" && method != "PUT" && method != "DELETE" && method != "PATCH" {
+			return c.Next()
+		}
+		// Skip untuk auth endpoints (sudah dilindungi rate limit + lockout)
+		p := c.Path()
+		if strings.HasPrefix(p, "/api/auth/") || strings.HasPrefix(p, "/api/public/") {
+			return c.Next()
+		}
+		// Hanya enforce untuk API endpoints
+		if !strings.HasPrefix(p, "/api/") {
+			return c.Next()
+		}
+		// Cek Origin atau Referer header
+		origin := c.Get("Origin")
+		referer := c.Get("Referer")
+		host := c.Hostname() // hostname dari request (sudah di-set Nginx via proxy_set_header Host)
+		if origin == "" && referer == "" {
+			// Tidak ada Origin/Referer — tolak
+			return c.Status(403).JSON(fiber.Map{"success": false, "message": "Forbidden: missing origin"})
+		}
+		// Validasi origin/referer harus sama-host
+		check := origin
+		if check == "" {
+			check = referer
+		}
+		u, err := url.Parse(check)
+		if err != nil || u.Hostname() != host {
+			return c.Status(403).JSON(fiber.Map{"success": false, "message": "Forbidden: invalid origin"})
+		}
+		return c.Next()
 	})
-	app.Use(csrfMiddleware)
 	app.Use(tenantMiddleware)
 
 	// Middleware Auth
