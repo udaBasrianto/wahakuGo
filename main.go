@@ -765,6 +765,13 @@ func setUserAIConfig(userID, tenantID int, cfg UserAIConfig) error {
 	if cfg.Providers == nil {
 		cfg.Providers = map[string]ProviderConfig{}
 	}
+	// Sanitize API keys sebelum disimpan ke DB
+	for k, p := range cfg.Providers {
+		p.APIKey = sanitizeAPIKey(p.APIKey)
+		p.Model = strings.TrimSpace(p.Model)
+		p.BaseURL = strings.TrimSpace(p.BaseURL)
+		cfg.Providers[k] = p
+	}
 	raw, err := json.Marshal(cfg.Providers)
 	if err != nil {
 		return err
@@ -4472,6 +4479,15 @@ func handleUserEvent(userID int, cli *whatsmeow.Client, evt interface{}) {
 	}
 }
 
+// sanitizeAPIKey membersihkan API key dari whitespace, newline, dan karakter tersembunyi
+func sanitizeAPIKey(key string) string {
+	key = strings.TrimSpace(key)
+	key = strings.ReplaceAll(key, "\n", "")
+	key = strings.ReplaceAll(key, "\r", "")
+	key = strings.ReplaceAll(key, "\t", "")
+	return key
+}
+
 func getActiveProviderConfig(userID, tenantID int, isAdmin bool) (string, ProviderConfig, string) {
 	userCfg, ok := getUserAIConfig(userID, tenantID)
 	if ok {
@@ -4483,7 +4499,8 @@ func getActiveProviderConfig(userID, tenantID int, isAdmin bool) (string, Provid
 		if !exists {
 			return providerName, ProviderConfig{}, "AI untuk akun ini belum dikonfigurasi untuk provider '" + providerName + "'."
 		}
-		if strings.TrimSpace(pConfig.APIKey) == "" {
+		pConfig.APIKey = sanitizeAPIKey(pConfig.APIKey)
+		if pConfig.APIKey == "" {
 			return providerName, ProviderConfig{}, "API Key untuk akun ini masih kosong. Isi API Key di AI Brain lalu Simpan."
 		}
 		if strings.TrimSpace(pConfig.Model) == "" {
@@ -5043,7 +5060,11 @@ func fetchModelsHandler(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"error": "Invalid JSON"})
 	}
 	provider := strings.ToLower(strings.TrimSpace(req.Provider))
+	// Bersihkan API key dari whitespace, newline, carriage return
 	apiKey := strings.TrimSpace(req.APIKey)
+	apiKey = strings.ReplaceAll(apiKey, "\n", "")
+	apiKey = strings.ReplaceAll(apiKey, "\r", "")
+	apiKey = strings.ReplaceAll(apiKey, "\t", "")
 	baseURL := strings.TrimSpace(req.BaseURL)
 
 	if provider == "" {
@@ -5310,6 +5331,8 @@ func fetchOpenAICompatibleModels(apiKey, baseURL, provider string) ([]string, er
 	url := baseURL + "/models"
 
 	req, _ := http.NewRequest("GET", url, nil)
+	// Trim semua whitespace termasuk newline dari API key
+	apiKey = strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(apiKey, "\n", ""), "\r", ""))
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 
 	resp, err := httpClient(15 * time.Second).Do(req)
