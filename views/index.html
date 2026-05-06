@@ -80,6 +80,10 @@
                     <i class="fas fa-history w-5 text-center"></i>
                     <span class="font-medium text-sm">Chat Logs</span>
                 </button>
+                <button id="nav-followup" onclick="showSection('followup')" class="nav-item w-full text-left flex items-center gap-3 px-3 py-2.5 rounded-lg text-gray-600 hover:bg-blue-50 hover:text-blue-700 transition-colors">
+                    <i class="fas fa-calendar-check w-5 text-center"></i>
+                    <span class="font-medium text-sm">Follow-up</span>
+                </button>
                 
                 <button id="nav-connections" onclick="showSection('connections')" class="nav-item w-full text-left flex items-center gap-3 px-3 py-2.5 rounded-lg text-gray-600 hover:bg-blue-50 hover:text-blue-700 transition-colors">
                     <span class="w-5 h-5 flex items-center justify-center rounded text-green-500">
@@ -551,6 +555,50 @@
                     </div>
                 </div>
 
+                <!-- SECTION: FOLLOW-UP -->
+                <div id="section-followup" class="section-content hidden space-y-6">
+                    <div class="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 max-w-4xl">
+                        <div class="flex items-center justify-between mb-5">
+                            <h3 class="text-lg font-bold text-gray-800"><i class="fas fa-calendar-check text-blue-500 mr-2"></i> Follow-up Terjadwal</h3>
+                            <button onclick="loadFollowups()" class="text-blue-600 hover:bg-blue-50 px-3 py-2 rounded-lg transition text-sm font-semibold">
+                                <i class="fas fa-sync-alt mr-2"></i> Refresh
+                            </button>
+                        </div>
+
+                        <form onsubmit="scheduleFollowup(event)" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">JID / Nomor Tujuan</label>
+                                <input id="followup-jid" type="text" required placeholder="Contoh: 62812xxxxxx@s.whatsapp.net atau 62812xxxxxx" class="w-full p-3 bg-gray-50 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                                <p class="text-xs text-gray-400 mt-1">Bisa paste dari Chat Logs (jid).</p>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">Waktu Kirim</label>
+                                <div class="grid grid-cols-2 gap-2">
+                                    <input id="followup-delay" type="number" min="1" value="60" class="w-full p-3 bg-gray-50 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="Menit">
+                                    <input id="followup-datetime" type="datetime-local" class="w-full p-3 bg-gray-50 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                                </div>
+                                <p class="text-xs text-gray-400 mt-1">Isi menit (delay) atau isi tanggal & jam (prioritas datetime).</p>
+                            </div>
+                            <div class="md:col-span-2">
+                                <label class="block text-sm font-medium text-gray-700 mb-1">Instruksi Follow-up</label>
+                                <textarea id="followup-instruction" rows="3" required class="w-full p-3 bg-gray-50 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="Contoh: Follow-up pelanggan, tanyakan apakah sudah sempat cek penawaran kemarin."></textarea>
+                            </div>
+                            <div class="md:col-span-2">
+                                <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2.5 rounded-lg font-medium shadow-md transition w-full">
+                                    <i class="fas fa-plus mr-2"></i> Jadwalkan Follow-up
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+
+                    <div class="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 max-w-4xl">
+                        <h4 class="text-sm font-bold text-gray-700 mb-4">Antrian Pending</h4>
+                        <div id="followup-list" class="divide-y divide-gray-100">
+                            <div class="py-6 text-center text-gray-400">Belum ada follow-up.</div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- SECTION: PROFILE -->
                 <div id="section-profile" class="section-content hidden space-y-6">
                     <div class="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 max-w-2xl">
@@ -851,6 +899,7 @@
             if(id === 'users') loadUsers();
             if(id === 'profile') loadProfile();
             if(id === 'chatlogs') loadChatContacts();
+            if(id === 'followup') loadFollowups();
         }
 
         function toggleSidebar() {
@@ -1034,6 +1083,101 @@
                 
             } catch(e) {
                 Swal.fire('Error', e.message, 'error');
+            }
+        }
+
+        async function loadFollowups() {
+            const el = document.getElementById('followup-list');
+            if (!el) return;
+            el.innerHTML = '<div class="py-6 text-center text-gray-400"><i class="fas fa-circle-notch fa-spin"></i> Loading...</div>';
+            try {
+                const res = await fetchAuth('/api/followup');
+                const data = await res.json();
+                if (!res.ok || !data.success) {
+                    throw new Error(data.message || data.error || 'Gagal memuat follow-up');
+                }
+                const tasks = data.tasks || [];
+                if (tasks.length === 0) {
+                    el.innerHTML = '<div class="py-6 text-center text-gray-400">Belum ada follow-up.</div>';
+                    return;
+                }
+                el.innerHTML = '';
+                tasks.forEach(t => {
+                    const wrap = document.createElement('div');
+                    wrap.className = 'py-4 flex items-start justify-between gap-4';
+                    const when = t.scheduled_time ? new Date(t.scheduled_time).toLocaleString() : '-';
+                    wrap.innerHTML = `
+                        <div class="min-w-0">
+                            <div class="flex flex-wrap items-center gap-2">
+                                <span class="text-xs font-bold px-2.5 py-1 rounded-full bg-blue-50 text-blue-700">Pending</span>
+                                <span class="text-xs text-gray-500">${when}</span>
+                            </div>
+                            <div class="mt-1 text-sm font-semibold text-gray-800 break-all">${t.jid || ''}</div>
+                            <div class="mt-2 text-sm text-gray-600 whitespace-pre-wrap">${t.instruction || ''}</div>
+                        </div>
+                        <button onclick="deleteFollowup(${t.id})" class="flex-none text-red-500 hover:bg-red-50 px-3 py-2 rounded-lg transition text-sm font-semibold border border-red-100">
+                            <i class="fas fa-trash-alt mr-2"></i> Batal
+                        </button>
+                    `;
+                    el.appendChild(wrap);
+                });
+            } catch (e) {
+                el.innerHTML = `<div class="py-6 text-center text-red-500">${e.message}</div>`;
+            }
+        }
+
+        async function scheduleFollowup(event) {
+            event.preventDefault();
+            const jid = document.getElementById('followup-jid').value.trim();
+            const instruction = document.getElementById('followup-instruction').value.trim();
+            const delayMinutes = parseInt(document.getElementById('followup-delay').value || '0', 10);
+            const scheduledLocal = (document.getElementById('followup-datetime').value || '').trim();
+
+            if (!jid || !instruction) {
+                Swal.fire('Error', 'JID dan instruksi wajib diisi', 'warning');
+                return;
+            }
+
+            const payload = { jid, instruction };
+            if (scheduledLocal) payload.scheduled_time = scheduledLocal;
+            else payload.delay_minutes = isNaN(delayMinutes) || delayMinutes <= 0 ? 60 : delayMinutes;
+
+            try {
+                const res = await fetchAuth('/api/followup', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+                if (!res.ok || !data.success) {
+                    throw new Error(data.message || data.error || 'Gagal menjadwalkan follow-up');
+                }
+                Swal.fire('Berhasil', 'Follow-up dijadwalkan', 'success');
+                document.getElementById('followup-instruction').value = '';
+                loadFollowups();
+            } catch (e) {
+                Swal.fire('Gagal', e.message, 'error');
+            }
+        }
+
+        async function deleteFollowup(id) {
+            const confirmed = await Swal.fire({
+                title: 'Batalkan follow-up?',
+                icon: 'warning',
+                showCancelButton: true,
+                confirmButtonText: 'Ya, Batalkan',
+                cancelButtonText: 'Batal'
+            });
+            if (!confirmed.isConfirmed) return;
+            try {
+                const res = await fetchAuth('/api/followup/' + id, { method: 'DELETE' });
+                const data = await res.json();
+                if (!res.ok || !data.success) {
+                    throw new Error(data.message || data.error || 'Gagal membatalkan follow-up');
+                }
+                loadFollowups();
+            } catch (e) {
+                Swal.fire('Gagal', e.message, 'error');
             }
         }
 

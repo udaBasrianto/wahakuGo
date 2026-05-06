@@ -1712,15 +1712,45 @@ func main() {
 		userID := c.Locals("userID").(int)
 		tenantID := c.Locals("tenantID").(int)
 		var req struct {
-			JID          string `json:"jid"`
-			DelayMinutes int    `json:"delay_minutes"`
-			Instruction  string `json:"instruction"`
+			JID           string `json:"jid"`
+			DelayMinutes  int    `json:"delay_minutes"`
+			ScheduledTime string `json:"scheduled_time"`
+			Instruction   string `json:"instruction"`
 		}
 		if err := c.BodyParser(&req); err != nil {
 			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid JSON"})
 		}
 
-		scheduledTime := time.Now().Add(time.Duration(req.DelayMinutes) * time.Minute)
+		req.JID = strings.TrimSpace(req.JID)
+		req.Instruction = strings.TrimSpace(req.Instruction)
+		req.ScheduledTime = strings.TrimSpace(req.ScheduledTime)
+
+		if req.JID == "" || req.Instruction == "" {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "jid dan instruction wajib diisi"})
+		}
+		if !strings.Contains(req.JID, "@") {
+			req.JID = normalizeWhatsAppNumber(req.JID) + "@s.whatsapp.net"
+		}
+
+		var scheduledTime time.Time
+		if req.ScheduledTime != "" {
+			if t, err := time.Parse(time.RFC3339, req.ScheduledTime); err == nil {
+				scheduledTime = t
+			} else if t, err := time.ParseInLocation("2006-01-02T15:04", req.ScheduledTime, time.Local); err == nil {
+				scheduledTime = t
+			} else {
+				return c.Status(400).JSON(fiber.Map{"success": false, "message": "Format scheduled_time tidak valid"})
+			}
+		} else {
+			if req.DelayMinutes <= 0 {
+				req.DelayMinutes = 60
+			}
+			scheduledTime = time.Now().Add(time.Duration(req.DelayMinutes) * time.Minute)
+		}
+
+		if scheduledTime.Before(time.Now().Add(30 * time.Second)) {
+			scheduledTime = time.Now().Add(1 * time.Minute)
+		}
 		_, err := authExec("INSERT INTO followup_tasks (tenant_id, user_id, jid, scheduled_time, instruction, status) VALUES (?, ?, ?, ?, ?, 'pending')",
 			tenantID, userID, req.JID, scheduledTime, req.Instruction)
 
@@ -1729,7 +1759,7 @@ func main() {
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Database Error"})
 		}
 
-		return c.JSON(fiber.Map{"success": true, "message": "Follow-up scheduled"})
+		return c.JSON(fiber.Map{"success": true, "message": "Follow-up scheduled", "scheduled_time": scheduledTime})
 	})
 
 	api.Get("/followup", func(c *fiber.Ctx) error {
