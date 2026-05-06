@@ -679,6 +679,7 @@
     <script>
         // Data Globals
         let currentConfig = {};
+        let currentIsAdmin = false;
         const providerModelDetails = {};
 
         const vertexRegions = [
@@ -1041,7 +1042,17 @@
                         knowledge_files: [],
                         providers: {}
                     };
+                    try {
+                        const res = await fetchAuth('/api/user/config');
+                        if (res.ok) {
+                            const data = await res.json();
+                            if (data && data.success && typeof data.system_prompt === 'string') {
+                                currentConfig.system_prompt = data.system_prompt;
+                            }
+                        }
+                    } catch (e) {}
                 }
+                currentIsAdmin = isAdmin;
                 
                 renderUI();
                 loadDevices();
@@ -1937,6 +1948,23 @@
             
             // Gather Data
             currentConfig.system_prompt = document.getElementById('system_prompt').value;
+            if (!currentIsAdmin) {
+                try {
+                    const res = await fetchAuth('/api/user/config', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ system_prompt: currentConfig.system_prompt })
+                    });
+                    const data = await res.json();
+                    if (!res.ok || !data.success) {
+                        throw new Error(data.message || data.error || 'Gagal menyimpan');
+                    }
+                    Swal.fire('Berhasil', 'Prompt Anda disimpan', 'success');
+                } catch (e) {
+                    Swal.fire('Gagal', e.message, 'error');
+                }
+                return;
+            }
             const groupRadios = document.getElementsByName('group_mode');
             groupRadios.forEach(radio => { if (radio.checked) currentConfig.group_mode = radio.value; });
             
@@ -1961,11 +1989,15 @@
             currentConfig.sheet.credentials_json = document.getElementById('sheet_creds').value;
 
             try {
-                await fetchAuth('/api/config', {
+                const res = await fetchAuth('/api/config', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify(currentConfig)
                 });
+                const data = await res.json();
+                if (!res.ok || !data.success) {
+                    throw new Error(data.message || data.error || 'Gagal menyimpan');
+                }
                 Swal.fire('Berhasil', 'Pengaturan disimpan', 'success');
                 renderUI();
             } catch(e) { Swal.fire('Gagal', e.message, 'error'); }

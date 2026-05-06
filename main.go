@@ -326,6 +326,13 @@ func initAuthSchema() error {
 			)`,
 			`CREATE UNIQUE INDEX IF NOT EXISTS users_tenant_username_unique ON users(tenant_id, username)`,
 			`CREATE UNIQUE INDEX IF NOT EXISTS users_tenant_email_unique ON users(tenant_id, email) WHERE email IS NOT NULL AND email <> ''`,
+			`CREATE TABLE IF NOT EXISTS user_settings (
+				tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+				user_id INTEGER NOT NULL REFERENCES users(id),
+				system_prompt TEXT NOT NULL DEFAULT '',
+				updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+				PRIMARY KEY (tenant_id, user_id)
+			)`,
 			`CREATE TABLE IF NOT EXISTS user_devices (
 				id SERIAL PRIMARY KEY,
 				tenant_id INTEGER NOT NULL DEFAULT 1 REFERENCES tenants(id),
@@ -384,6 +391,15 @@ func initAuthSchema() error {
 		is_active BOOLEAN DEFAULT 0,
 		FOREIGN KEY(tenant_id) REFERENCES tenants(id)
 	);
+	CREATE TABLE IF NOT EXISTS user_settings (
+		tenant_id INTEGER NOT NULL DEFAULT 1,
+		user_id INTEGER NOT NULL,
+		system_prompt TEXT DEFAULT '',
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY(tenant_id) REFERENCES tenants(id),
+		FOREIGN KEY(user_id) REFERENCES users(id),
+		UNIQUE(tenant_id, user_id)
+	);
 	CREATE TABLE IF NOT EXISTS user_devices (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		tenant_id INTEGER NOT NULL DEFAULT 1,
@@ -422,6 +438,35 @@ func initAuthSchema() error {
 		FOREIGN KEY(tenant_id) REFERENCES tenants(id),
 		UNIQUE(tenant_id, filename)
 	);`)
+	return err
+}
+
+func getUserSystemPrompt(userID, tenantID int) string {
+	var prompt string
+	err := authQueryRow("SELECT COALESCE(system_prompt, '') FROM user_settings WHERE user_id = ? AND tenant_id = ?", userID, tenantID).Scan(&prompt)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(prompt)
+}
+
+func setUserSystemPrompt(userID, tenantID int, prompt string) error {
+	prompt = strings.TrimSpace(prompt)
+	if authDialect == "postgres" {
+		_, err := authExec(
+			`INSERT INTO user_settings (tenant_id, user_id, system_prompt, updated_at)
+			 VALUES (?, ?, ?, NOW())
+			 ON CONFLICT (tenant_id, user_id) DO UPDATE SET system_prompt = EXCLUDED.system_prompt, updated_at = NOW()`,
+			tenantID, userID, prompt,
+		)
+		return err
+	}
+	_, err := authExec(
+		`INSERT INTO user_settings (tenant_id, user_id, system_prompt, updated_at)
+		 VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+		 ON CONFLICT(tenant_id, user_id) DO UPDATE SET system_prompt = excluded.system_prompt, updated_at = CURRENT_TIMESTAMP`,
+		tenantID, userID, prompt,
+	)
 	return err
 }
 
@@ -1982,6 +2027,31 @@ func main() {
 		return c.JSON(fiber.Map{"success": true, "contacts": contacts})
 	})
 
+	api.Get("/user/config", func(c *fiber.Ctx) error {
+		userID := c.Locals("userID").(int)
+		tenantID := c.Locals("tenantID").(int)
+		return c.JSON(fiber.Map{
+			"success":       true,
+			"system_prompt": getUserSystemPrompt(userID, tenantID),
+		})
+	})
+
+	api.Post("/user/config", func(c *fiber.Ctx) error {
+		userID := c.Locals("userID").(int)
+		tenantID := c.Locals("tenantID").(int)
+		var req struct {
+			SystemPrompt string `json:"system_prompt"`
+		}
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid JSON"})
+		}
+		if err := setUserSystemPrompt(userID, tenantID, req.SystemPrompt); err != nil {
+			log.Println("Failed to save user system prompt:", err)
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Gagal menyimpan prompt"})
+		}
+		return c.JSON(fiber.Map{"success": true})
+	})
+
 	type ChatLogEntry struct {
 		Role      string `json:"role"`
 		Message   string `json:"message"`
@@ -2086,8 +2156,9 @@ func main() {
 		if cfgErr != "" {
 			return c.Status(400).JSON(fiber.Map{"success": false, "message": cfgErr, "provider": providerName})
 		}
+		userID := c.Locals("userID").(int)
 		tenantID := c.Locals("tenantID").(int)
-		reply := callAI(tenantID, prompt)
+		reply := callAI(userID, tenantID, prompt)
 		return c.JSON(fiber.Map{"success": true, "reply": reply, "provider": providerName})
 	})
 
@@ -2629,7 +2700,7 @@ func handleUserEvent(userID int, cli *whatsmeow.Client, evt interface{}) {
 			log.Printf("[User %d] Waiting %v before replying...", userID, delaySeconds)
 			time.Sleep(delaySeconds)
 
-			reply := callAI(tenantID, msg)
+			reply := callAI(userID, tenantID, msg)
 			log.Printf("[User %d] AI Reply generated (len=%d)", userID, len(reply))
 
 			historyMutex.Lock()
@@ -2749,7 +2820,7 @@ func getActiveProviderConfig() (string, ProviderConfig, string) {
 	return providerName, pConfig, ""
 }
 
-func callAI(tenantID int, prompt string) string {
+func callAI(userID, tenantID int, prompt string) string {
 	const MaxInputLength = 4000
 	if len(prompt) > MaxInputLength {
 		prompt = prompt[:MaxInputLength]
@@ -2764,10 +2835,12 @@ func callAI(tenantID int, prompt string) string {
 		contextText = contextText[:15000]
 	}
 
-	// 2. Build System Prompt (use global config)
-	mu.Lock()
-	sysPrompt := cfg.SystemPrompt
-	mu.Unlock()
+	sysPrompt := getUserSystemPrompt(userID, tenantID)
+	if sysPrompt == "" {
+		mu.Lock()
+		sysPrompt = cfg.SystemPrompt
+		mu.Unlock()
+	}
 	if sysPrompt == "" {
 		sysPrompt = "You are a helpful assistant."
 	}
@@ -3215,7 +3288,7 @@ func processFollowups() {
 			log.Println("Processing Followup Task:", t.ID)
 
 			// Generate Message
-			reply := callAI(t.TenantID, "Generate a follow-up message for: "+t.Instruction)
+			reply := callAI(t.UserID, t.TenantID, "Generate a follow-up message for: "+t.Instruction)
 
 			// Send
 			cli := getUserClient(t.UserID)
